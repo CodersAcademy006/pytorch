@@ -25,6 +25,7 @@ from tools.stats.generate_test_times_from_reports import (
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _write_xml(path: Path, content: str) -> None:
     """Write *content* to *path*, creating parent directories as needed."""
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -260,10 +261,14 @@ class TestMainEndToEnd(unittest.TestCase):
 
     def _run(self, reports_dir: Path, output_dir: Path, **kwargs: str) -> int:
         argv = [
-            "--reports-dir", str(reports_dir),
-            "--output-dir", str(output_dir),
-            "--job-name", kwargs.get("job_name", "test-job"),
-            "--test-config", kwargs.get("test_config", "default"),
+            "--reports-dir",
+            str(reports_dir),
+            "--output-dir",
+            str(output_dir),
+            "--job-name",
+            kwargs.get("job_name", "test-job"),
+            "--test-config",
+            kwargs.get("test_config", "default"),
         ]
         return main(argv)
 
@@ -313,18 +318,21 @@ class TestMainEndToEnd(unittest.TestCase):
         self.assertAlmostEqual(times["default"]["default"]["test_baz"], 4.0)
 
         # Class times
-        self.assertAlmostEqual(
-            class_times["my-job"]["slow"]["Baz::test_baz"], 4.0
-        )
+        self.assertAlmostEqual(class_times["my-job"]["slow"]["Baz::test_baz"], 4.0)
 
     def test_nonexistent_reports_dir_returns_nonzero(self) -> None:
         with TemporaryDirectory() as tmp:
             output = Path(tmp) / "output"
-            rc = main([
-                "--reports-dir", "/this/does/not/exist",
-                "--output-dir", str(output),
-                "--job-name", "x",
-            ])
+            rc = main(
+                [
+                    "--reports-dir",
+                    "/this/does/not/exist",
+                    "--output-dir",
+                    str(output),
+                    "--job-name",
+                    "x",
+                ]
+            )
         self.assertNotEqual(rc, 0)
 
     def test_output_dir_is_created_if_missing(self) -> None:

@@ -14,7 +14,6 @@ import json
 import sys
 import xml.etree.ElementTree as ET
 from pathlib import Path
-from typing import DefaultDict
 from collections import defaultdict
 
 
@@ -38,10 +37,10 @@ def _parse_xml(report: Path) -> tuple[dict[str, float], dict[str, float]]:
     """
     invoking_module = report.parent.name
     module_total: float = 0.0
-    class_totals: DefaultDict[str, float] = defaultdict(float)
+    class_totals: defaultdict[str, float] = defaultdict(float)
 
     try:
-        tree = ET.parse(report)  # noqa: S314 – local files only, no network input
+        tree = ET.parse(report)
     except ET.ParseError:
         # Malformed XML is silently skipped; a warning is printed so the
         # operator is aware but the rest of the run is unaffected.
@@ -76,8 +75,8 @@ def collect_times(
     module_times, class_times
         Aggregated dictionaries as described in ``_parse_xml``.
     """
-    all_module_times: DefaultDict[str, float] = defaultdict(float)
-    all_class_times: DefaultDict[str, float] = defaultdict(float)
+    all_module_times: defaultdict[str, float] = defaultdict(float)
+    all_class_times: defaultdict[str, float] = defaultdict(float)
 
     xml_files = list(reports_dir.rglob("*.xml"))
     if not xml_files:
@@ -195,8 +194,12 @@ def main(argv: list[str] | None = None) -> int:
     test_times_payload = _build_payload(module_times, args.job_name, args.test_config)
     class_times_payload = _build_payload(class_times, args.job_name, args.test_config)
 
-    test_times_path.write_text(json.dumps(test_times_payload, indent=2), encoding="utf-8")
-    class_times_path.write_text(json.dumps(class_times_payload, indent=2), encoding="utf-8")
+    test_times_path.write_text(
+        json.dumps(test_times_payload, indent=2), encoding="utf-8"
+    )
+    class_times_path.write_text(
+        json.dumps(class_times_payload, indent=2), encoding="utf-8"
+    )
 
     print(f"Wrote: {test_times_path}")
     print(f"Wrote: {class_times_path}")
