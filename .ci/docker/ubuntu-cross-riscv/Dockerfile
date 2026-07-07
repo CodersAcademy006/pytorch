@@ -147,7 +147,9 @@ ENV PATH="/usr/local/bin:${PATH}"
 # Set up cross Python environment
 SHELL ["/bin/bash", "-c"]
 RUN source /opt/riscv-cross-env/bin/activate \
-    && pip install setuptools pyyaml typing_extensions wheel build
+    && pip install build wheel \
+       "setuptools>=77.0.0,<82" "cmake>=3.27" ninja numpy "packaging>=24.2" \
+       pyyaml requests six "typing-extensions>=4.10.0"
 
 # Set default environment variables for PyTorch build
 ENV Python_ROOT_DIR=${SYSROOT}
