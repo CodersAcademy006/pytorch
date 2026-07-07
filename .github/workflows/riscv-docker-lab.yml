@@ -47,6 +47,7 @@ jobs:
         run: |
           mkdir -p artifacts/docker/logs
           docker buildx build \
+            --load \
             --progress plain \
             --cache-from type=gha,scope=riscv-cross \
             --cache-to type=gha,mode=max,scope=riscv-cross \
