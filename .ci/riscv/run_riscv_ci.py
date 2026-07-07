@@ -179,6 +179,13 @@ def cflags(arch: str) -> list[str]:
         f"-march={arch}",
         "-mabi=lp64d",
         "-I.",
+        # No CMake configure step runs in this lab, so torch/headeronly/macros/
+        # cmake_macros.h (a #cmakedefine template) was never generated. This is
+        # the documented escape hatch for non-CMake build systems (see the
+        # comment above C10_USING_CUSTOM_GENERATED_MACROS in
+        # torch/headeronly/macros/Export.h): it skips that include instead of
+        # needing us to fabricate the generated header.
+        "-DC10_USING_CUSTOM_GENERATED_MACROS",
     ]
 
 
