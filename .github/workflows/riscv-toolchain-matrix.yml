@@ -1,0 +1,170 @@
+name: riscv-toolchain-matrix
+
+# Axis-at-a-time toolchain regression sweep: each leg varies exactly one
+# toolchain dimension (gcc version, clang version, cmake version, or runner
+# OS) against the same rv64gc baseline everything else in this lab already
+# uses (gcc-14 / cmake 4.0.0 / ubuntu-24.04), instead of a full combinatorial
+# cross-product. That keeps "which version caused the regression" legible
+# and keeps this workflow from becoming the thing that mostly re-validates
+# QEMU itself. Add a version by adding one line to the matrix below.
+
+on:
+  push:
+    branches:
+      - "**"
+    paths:
+      - ".ci/riscv/toolchain_smoke.cpp"
+      - ".ci/riscv/cmake-smoke/**"
+      - ".github/workflows/riscv-toolchain-matrix.yml"
+  pull_request:
+    paths:
+      - ".ci/riscv/toolchain_smoke.cpp"
+      - ".ci/riscv/cmake-smoke/**"
+      - ".github/workflows/riscv-toolchain-matrix.yml"
+  workflow_dispatch:
+  schedule:
+    - cron: "13 4 * * 1" # weekly, Mondays -- heavier than the daily nightly sweep
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  toolchain-leg:
+    name: ${{ matrix.axis }}=${{ matrix.value }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - axis: gcc
+            value: "12"
+            runner: ubuntu-24.04
+          - axis: gcc
+            value: "13"
+            runner: ubuntu-24.04
+          - axis: gcc
+            value: "14"
+            runner: ubuntu-24.04
+            baseline: true
+          - axis: clang
+            value: "16"
+            runner: ubuntu-24.04
+          - axis: clang
+            value: "18"
+            runner: ubuntu-24.04
+          - axis: cmake
+            value: "3.28.3"
+            runner: ubuntu-24.04
+          - axis: cmake
+            value: "4.0.0"
+            runner: ubuntu-24.04
+            baseline: true
+          - axis: os
+            value: "ubuntu-22.04"
+            runner: ubuntu-22.04
+          - axis: os
+            value: "ubuntu-24.04"
+            runner: ubuntu-24.04
+            baseline: true
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install baseline RISC-V toolchain + qemu
+        id: baseline
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-user qemu-user-static ninja-build
+
+          # Ubuntu point releases don't all package the same gcc-N-riscv64
+          # cross versions (e.g. gcc-14-riscv64-linux-gnu is noble-only, not
+          # on jammy) -- detect the newest one this OS actually has instead
+          # of hardcoding a version, so the "os" axis tests "does the
+          # toolchain work here" and not "does gcc-14 happen to exist here".
+          for v in 14 13 12; do
+            if apt-cache show "g++-${v}-riscv64-linux-gnu" >/dev/null 2>&1; then
+              sudo apt-get install -y --no-install-recommends "g++-${v}-riscv64-linux-gnu" "gcc-${v}-riscv64-linux-gnu"
+              echo "suffix=-${v}" >> "${GITHUB_OUTPUT}"
+              exit 0
+            fi
+          done
+          echo "No g++-{14,13,12}-riscv64-linux-gnu package found on this Ubuntu release" >&2
+          exit 1
+
+      - name: gcc axis
+        if: matrix.axis == 'gcc' && matrix.value != '14'
+        shell: bash
+        run: |
+          pkg="g++-${{ matrix.value }}-riscv64-linux-gnu"
+          if ! apt-cache show "$pkg" >/dev/null 2>&1; then
+            echo "- \`$pkg\` not available on this Ubuntu release -- skipped" >> "${GITHUB_STEP_SUMMARY}"
+            exit 0
+          fi
+          sudo apt-get install -y --no-install-recommends "$pkg" "gcc-${{ matrix.value }}-riscv64-linux-gnu"
+          riscv64-linux-gnu-g++-${{ matrix.value }} -std=c++17 -O2 -march=rv64gc -mabi=lp64d \
+            .ci/riscv/toolchain_smoke.cpp -o /tmp/smoke
+          qemu-riscv64 -L /usr/riscv64-linux-gnu /tmp/smoke | tee -a "${GITHUB_STEP_SUMMARY}"
+
+      - name: gcc baseline (14)
+        if: matrix.axis == 'gcc' && matrix.value == '14'
+        shell: bash
+        run: |
+          riscv64-linux-gnu-g++${{ steps.baseline.outputs.suffix }} -std=c++17 -O2 -march=rv64gc -mabi=lp64d \
+            .ci/riscv/toolchain_smoke.cpp -o /tmp/smoke
+          qemu-riscv64 -L /usr/riscv64-linux-gnu /tmp/smoke | tee -a "${GITHUB_STEP_SUMMARY}"
+
+      - name: clang axis
+        if: matrix.axis == 'clang'
+        shell: bash
+        run: |
+          pkg="clang-${{ matrix.value }}"
+          if ! apt-cache show "$pkg" >/dev/null 2>&1; then
+            echo "- \`$pkg\` not available on this Ubuntu release -- skipped" >> "${GITHUB_STEP_SUMMARY}"
+            exit 0
+          fi
+          sudo apt-get install -y --no-install-recommends "$pkg"
+          "clang++-${{ matrix.value }}" --target=riscv64-linux-gnu --gcc-toolchain=/usr \
+            -march=rv64gc -mabi=lp64d -std=c++17 -O2 \
+            .ci/riscv/toolchain_smoke.cpp -o /tmp/smoke
+          qemu-riscv64 -L /usr/riscv64-linux-gnu /tmp/smoke | tee -a "${GITHUB_STEP_SUMMARY}"
+
+      - name: cmake axis
+        if: matrix.axis == 'cmake'
+        shell: bash
+        run: |
+          python3 -m pip install --user "cmake==${{ matrix.value }}"
+          export PATH="$HOME/.local/bin:$PATH"
+          cmake --version | head -1 >> "${GITHUB_STEP_SUMMARY}"
+          cmake -S .ci/riscv/cmake-smoke -B /tmp/build \
+            -DCMAKE_TOOLCHAIN_FILE="${PWD}/.ci/riscv/cmake-smoke/toolchain-riscv64.cmake" \
+            -DRISCV_GCC_SUFFIX="${{ steps.baseline.outputs.suffix }}" -G Ninja
+          cmake --build /tmp/build
+          qemu-riscv64 -L /usr/riscv64-linux-gnu /tmp/build/toolchain_smoke | tee -a "${GITHUB_STEP_SUMMARY}"
+
+      - name: os axis
+        if: matrix.axis == 'os'
+        shell: bash
+        run: |
+          riscv64-linux-gnu-g++${{ steps.baseline.outputs.suffix }} -std=c++17 -O2 -march=rv64gc -mabi=lp64d \
+            .ci/riscv/toolchain_smoke.cpp -o /tmp/smoke
+          qemu-riscv64 -L /usr/riscv64-linux-gnu /tmp/smoke | tee -a "${GITHUB_STEP_SUMMARY}"
+          echo "- runner: \`${{ matrix.runner }}\` gcc: \`riscv64-linux-gnu-g++${{ steps.baseline.outputs.suffix }}\`" >> "${GITHUB_STEP_SUMMARY}"
+
+  toolchain-summary:
+    name: toolchain-summary
+    runs-on: ubuntu-24.04
+    needs: toolchain-leg
+    if: always()
+    steps:
+      - name: Gate
+        shell: bash
+        run: |
+          echo "Toolchain matrix result: ${{ needs.toolchain-leg.result }}" >> "${GITHUB_STEP_SUMMARY}"
+          test "${{ needs.toolchain-leg.result }}" = "success"
