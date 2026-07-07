@@ -6,11 +6,11 @@ on:
       - "**"
     paths:
       - ".github/workflows/riscv-full-build.yml"
-      - ".ci/riscv/**"
+      - ".ci/docker/ubuntu-cross-riscv/**"
   pull_request:
     paths:
       - ".github/workflows/riscv-full-build.yml"
-      - ".ci/riscv/**"
+      - ".ci/docker/ubuntu-cross-riscv/**"
   workflow_dispatch:
     inputs:
       ref:
