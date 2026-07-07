@@ -148,7 +148,7 @@ ENV PATH="/usr/local/bin:${PATH}"
 SHELL ["/bin/bash", "-c"]
 RUN source /opt/riscv-cross-env/bin/activate \
     && pip install build wheel \
-       "setuptools>=77.0.0,<82" "cmake>=3.27" ninja numpy "packaging>=24.2" \
+       "setuptools>=77.0.0,<82" numpy "packaging>=24.2" \
        pyyaml requests six "typing-extensions>=4.10.0"
 
 # Set default environment variables for PyTorch build
