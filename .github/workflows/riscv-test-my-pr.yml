@@ -40,9 +40,15 @@ jobs:
       - name: Checkout fork
         uses: actions/checkout@v4
 
-      - name: Resolve target ref
+      - name: Merge target ref onto this branch
         shell: bash
         run: |
+          # Merge (not checkout-replace) so the PR/branch's code changes land
+          # on top of this branch's own .ci/riscv/ harness -- an upstream PR
+          # ref doesn't have run_riscv_ci.py at all, so replacing the tree
+          # wholesale would delete the very harness this workflow runs.
+          git config user.email "riscv-ci-lab@localhost"
+          git config user.name "riscv-ci-lab"
           ref="${{ github.event.inputs.ref }}"
           if [[ "${ref}" =~ ^[0-9]+$ ]]; then
             echo "Fetching upstream pytorch/pytorch PR #${ref} (read-only)"
@@ -51,7 +57,7 @@ jobs:
             echo "Fetching fork ref ${ref}"
             git fetch origin "${ref}"
           fi
-          git checkout FETCH_HEAD
+          git merge --no-edit FETCH_HEAD
 
       - name: Install public RISC-V toolchain
         shell: bash
