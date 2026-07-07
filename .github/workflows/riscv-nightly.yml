@@ -1,0 +1,131 @@
+name: riscv-nightly
+
+on:
+  push:
+    branches:
+      - "**"
+    paths:
+      - ".ci/riscv/**"
+      - ".github/workflows/riscv-nightly.yml"
+  pull_request:
+    paths:
+      - ".ci/riscv/**"
+      - ".github/workflows/riscv-nightly.yml"
+  workflow_dispatch:
+  schedule:
+    - cron: "41 3 * * *"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  actions: read
+
+env:
+  CCACHE_DIR: ${{ github.workspace }}/.ccache
+  RISCV_CXX: ccache riscv64-linux-gnu-g++
+
+jobs:
+  nightly-validation:
+    name: nightly-${{ matrix.suite }}-${{ matrix.arch }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: [cross, kernels, compiler, backend]
+        arch: [rv64gc, rv64gcv]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install public RISC-V toolchain
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            ccache \
+            clang \
+            cmake \
+            g++-riscv64-linux-gnu \
+            gcc-riscv64-linux-gnu \
+            ninja-build \
+            qemu-user \
+            qemu-user-static
+
+      - name: Restore compiler cache
+        uses: actions/cache@v4
+        with:
+          path: .ccache
+          key: riscv64-nightly-${{ runner.os }}-${{ matrix.suite }}-${{ matrix.arch }}-${{ github.run_id }}
+          restore-keys: |
+            riscv64-nightly-${{ runner.os }}-${{ matrix.suite }}-${{ matrix.arch }}-
+            riscv64-${{ runner.os }}-
+
+      - name: Run nightly RISC-V suite
+        shell: bash
+        run: |
+          mkdir -p "artifacts/nightly-${{ matrix.suite }}-${{ matrix.arch }}"
+          python .ci/riscv/run_riscv_ci.py \
+            --suite "${{ matrix.suite }}" \
+            --arch "${{ matrix.arch }}" \
+            --artifact-dir "artifacts/nightly-${{ matrix.suite }}-${{ matrix.arch }}"
+          ccache --show-stats | tee "artifacts/nightly-${{ matrix.suite }}-${{ matrix.arch }}/logs/ccache-stats.log"
+
+      - name: Upload nightly artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: riscv64-nightly-${{ matrix.suite }}-${{ matrix.arch }}-${{ github.run_attempt }}
+          path: artifacts/nightly-${{ matrix.suite }}-${{ matrix.arch }}
+          if-no-files-found: error
+
+  nightly-summary:
+    name: nightly-summary
+    runs-on: ubuntu-24.04
+    needs: nightly-validation
+    if: always()
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download nightly matrix artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: riscv64-nightly-*-${{ github.run_attempt }}
+          path: artifacts
+        continue-on-error: true
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Aggregate JUnit results and regenerate test-times.json
+        shell: bash
+        run: |
+          {
+            echo "# RISC-V nightly CI"
+            echo
+            echo "- Ref: \`${{ github.ref }}\`"
+            echo "- Matrix result: \`${{ needs.nightly-validation.result }}\`"
+            echo
+          } >> "${GITHUB_STEP_SUMMARY}"
+          python .ci/riscv/aggregate_summary.py \
+            --artifacts-dir artifacts \
+            --output-dir artifacts/_rollup \
+            --job-name riscv64-nightly
+
+      - name: Upload rollup and canonical test-times.json
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: riscv64-nightly-test-times-${{ github.run_attempt }}
+          path: artifacts/_rollup
+          if-no-files-found: warn
+
+      - name: Gate on matrix result
+        shell: bash
+        run: test "${{ needs.nightly-validation.result }}" = "success"

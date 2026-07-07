@@ -1,0 +1,5 @@
+{
+  "version": 1,
+  "description": "Personal fork RISC-V CI blocklist. Entries are matched by suite, arch, and test name.",
+  "entries": []
+}
