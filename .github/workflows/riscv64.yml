@@ -75,8 +75,35 @@ env:
   RISCV_CXX: ccache riscv64-linux-gnu-g++
 
 jobs:
+  impact-analysis:
+    name: impact-analysis
+    runs-on: ubuntu-24.04
+    if: github.event_name != 'workflow_dispatch'
+    outputs:
+      run_cross: ${{ steps.analyze.outputs.run_cross }}
+      run_kernels: ${{ steps.analyze.outputs.run_kernels }}
+      run_compiler: ${{ steps.analyze.outputs.run_compiler }}
+      run_backend: ${{ steps.analyze.outputs.run_backend }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 50
+
+      - name: Analyze impact
+        id: analyze
+        shell: bash
+        run: |
+          base="${{ github.event.pull_request.base.sha || github.event.before }}"
+          if [[ -z "${base}" || "${base}" =~ ^0+$ ]]; then
+            base="HEAD~1"
+          fi
+          python .ci/riscv/impact_analysis.py --base "${base}" --head "${{ github.sha }}"
+
   riscv-validation:
     name: ${{ matrix.suite }}-${{ matrix.arch }}
+    needs: impact-analysis
+    if: ${{ !cancelled() && needs.impact-analysis.result != 'failure' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     strategy:
@@ -91,22 +118,38 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Select workflow_dispatch scope
+      - name: Select run scope
         id: scope
         shell: bash
+        env:
+          RUN_CROSS: ${{ needs.impact-analysis.outputs.run_cross }}
+          RUN_KERNELS: ${{ needs.impact-analysis.outputs.run_kernels }}
+          RUN_COMPILER: ${{ needs.impact-analysis.outputs.run_compiler }}
+          RUN_BACKEND: ${{ needs.impact-analysis.outputs.run_backend }}
         run: |
           requested_suite="${{ github.event.inputs.suite || 'all' }}"
           requested_arch="${{ github.event.inputs.arch || 'rv64gc' }}"
           should_run=true
           if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            # Manual dispatch is the explicit "force" escape hatch: it always
+            # bypasses impact analysis and runs exactly what was requested.
             if [[ "${requested_suite}" != "all" && "${requested_suite}" != "${{ matrix.suite }}" ]]; then
               should_run=false
             fi
             if [[ "${requested_arch}" != "${{ matrix.arch }}" ]]; then
               should_run=false
             fi
+          else
+            varname="RUN_$(echo "${{ matrix.suite }}" | tr '[:lower:]' '[:upper:]')"
+            impact_flag="${!varname:-true}"
+            if [[ "${impact_flag}" == "false" ]]; then
+              should_run=false
+            fi
           fi
           echo "should-run=${should_run}" >> "${GITHUB_OUTPUT}"
+          if [[ "${should_run}" == "false" ]]; then
+            echo "- \`${{ matrix.suite }}-${{ matrix.arch }}\` skipped: impact analysis found no changes affecting this suite" >> "${GITHUB_STEP_SUMMARY}"
+          fi
 
       - name: Install public RISC-V toolchain
         if: steps.scope.outputs.should-run == 'true'
