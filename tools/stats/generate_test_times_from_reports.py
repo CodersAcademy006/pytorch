@@ -13,8 +13,8 @@ import argparse
 import json
 import sys
 import xml.etree.ElementTree as ET
-from pathlib import Path
 from collections import defaultdict
+from pathlib import Path
 
 
 # ---------------------------------------------------------------------------
