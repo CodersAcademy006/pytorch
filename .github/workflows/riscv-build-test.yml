@@ -92,66 +92,77 @@ jobs:
             -t pytorch-riscv-cross:ci \
             .ci/docker 2>&1 | tee artifacts/build-test/logs/docker-build.log
 
-      - name: Cross-build PyTorch (real .ci/pytorch/build.sh)
-        id: build
+      - name: Cross-build + verify import + test (single container run)
         shell: bash
         run: |
-          set +e
+          mkdir -p artifacts/build-test/logs artifacts/build-test/test-reports
+          # Written as a script file, not inlined into `docker run ... bash -lc
+          # '...'`, to avoid quote-nesting hell (the python -c snippet already
+          # needs double quotes). One container invocation for all three
+          # phases so there's no host<->container UID handoff between them --
+          # build.sh's own internal `sudo chown -R jenkins <workspace>` (real,
+          # needed by build.sh itself) would otherwise lock the host runner
+          # user out of writing to the bind-mounted workspace between separate
+          # `docker run` steps.
+          cat > artifacts/build-test/run.sh <<'INNER_EOF'
+          #!/bin/bash
+          set -o pipefail
+          bash .ci/pytorch/build.sh 2>&1 | tee artifacts/build-test/logs/build.log
+          echo "${PIPESTATUS[0]}" > artifacts/build-test/logs/build.exit
+
+          if [ "$(cat artifacts/build-test/logs/build.exit)" = "0" ]; then
+            source /opt/riscv-cross-env/bin/activate
+            qemu-riscv64 -L /opt/sysroot "$(which python3)" -c "import torch; print(torch.__version__); x = torch.arange(5); print(int(x.sum()))" 2>&1 | tee artifacts/build-test/logs/import-check.log
+            echo "${PIPESTATUS[0]}" > artifacts/build-test/logs/import.exit
+          else
+            echo skipped > artifacts/build-test/logs/import.exit
+          fi
+
+          if [ "$(cat artifacts/build-test/logs/import.exit)" = "0" ]; then
+            qemu-riscv64 -L /opt/sysroot "$(which python3)" test/run_test.py -i test_torch --save-xml test/test-reports -v 2>&1 | tee artifacts/build-test/logs/test.log
+            echo "${PIPESTATUS[0]}" > artifacts/build-test/logs/test.exit
+            cp -r test/test-reports artifacts/build-test/test-reports 2>/dev/null || true
+          else
+            echo skipped > artifacts/build-test/logs/test.exit
+          fi
+          INNER_EOF
+          chmod +x artifacts/build-test/run.sh
+
           docker run --rm \
             -e BUILD_ENVIRONMENT=linux-noble-riscv64-py3.12-gcc14-cross-build \
             -e MAX_JOBS="$(nproc)" \
-            -v "${GITHUB_WORKSPACE}:/var/lib/jenkins/workspace" \
-            -w /var/lib/jenkins/workspace \
-            --user jenkins \
-            pytorch-riscv-cross:ci \
-            bash .ci/pytorch/build.sh \
-            2>&1 | tee artifacts/build-test/logs/build.log
-          echo "exit=${PIPESTATUS[0]}" >> "${GITHUB_OUTPUT}"
-
-      - name: Verify torch imports under QEMU
-        id: import
-        if: steps.build.outputs.exit == '0'
-        shell: bash
-        run: |
-          set +e
-          docker run --rm \
-            -v "${GITHUB_WORKSPACE}:/var/lib/jenkins/workspace" \
-            -w /var/lib/jenkins/workspace \
-            --user jenkins \
-            pytorch-riscv-cross:ci \
-            bash -lc 'source /opt/riscv-cross-env/bin/activate && qemu-riscv64 -L /opt/sysroot "$(which python3)" -c "import torch; print(torch.__version__); x = torch.arange(5); print(int(x.sum()))"' \
-            2>&1 | tee artifacts/build-test/logs/import-check.log
-          echo "exit=${PIPESTATUS[0]}" >> "${GITHUB_OUTPUT}"
-
-      - name: Run a minimal real test/run_test.py subset
-        id: test
-        if: steps.import.outputs.exit == '0'
-        shell: bash
-        run: |
-          set +e
-          mkdir -p artifacts/build-test/test-reports
-          docker run --rm \
             -e PYTORCH_TEST_WITH_SLOW=0 \
             -v "${GITHUB_WORKSPACE}:/var/lib/jenkins/workspace" \
             -w /var/lib/jenkins/workspace \
             --user jenkins \
             pytorch-riscv-cross:ci \
-            bash -lc 'source /opt/riscv-cross-env/bin/activate && qemu-riscv64 -L /opt/sysroot "$(which python3)" test/run_test.py -i test_torch --save-xml test/test-reports -v' \
-            2>&1 | tee artifacts/build-test/logs/test.log
-          echo "exit=${PIPESTATUS[0]}" >> "${GITHUB_OUTPUT}"
-          cp -r test/test-reports artifacts/build-test/test-reports 2>/dev/null || true
+            bash artifacts/build-test/run.sh || true
+
+      - name: Reclaim workspace ownership for host steps
+        if: always()
+        shell: bash
+        run: sudo chown -R "$(id -u)":"$(id -g)" "${GITHUB_WORKSPACE}"
 
       - name: Record result
+        id: record
         if: always()
         shell: bash
         run: |
+          build_exit=$(cat artifacts/build-test/logs/build.exit 2>/dev/null || echo "not-run")
+          import_exit=$(cat artifacts/build-test/logs/import.exit 2>/dev/null || echo "not-run")
+          test_exit=$(cat artifacts/build-test/logs/test.exit 2>/dev/null || echo "not-run")
           {
             echo "# RISC-V real build + test"
             echo
-            echo "- Build: \`${{ steps.build.outputs.exit || 'not run' }}\`"
-            echo "- Import check: \`${{ steps.import.outputs.exit || 'not run' }}\`"
-            echo "- Test subset: \`${{ steps.test.outputs.exit || 'not run' }}\`"
+            echo "- Build: \`${build_exit}\`"
+            echo "- Import check: \`${import_exit}\`"
+            echo "- Test subset: \`${test_exit}\`"
           } >> "${GITHUB_STEP_SUMMARY}"
+          {
+            echo "build_exit=${build_exit}"
+            echo "import_exit=${import_exit}"
+            echo "test_exit=${test_exit}"
+          } >> "${GITHUB_OUTPUT}"
 
       - name: Upload artifacts
         if: always()
@@ -164,6 +175,6 @@ jobs:
       - name: Gate
         shell: bash
         run: |
-          test "${{ steps.build.outputs.exit }}" = "0" && \
-          test "${{ steps.import.outputs.exit }}" = "0" && \
-          test "${{ steps.test.outputs.exit }}" = "0"
+          test "${{ steps.record.outputs.build_exit }}" = "0" && \
+          test "${{ steps.record.outputs.import_exit }}" = "0" && \
+          test "${{ steps.record.outputs.test_exit }}" = "0"
