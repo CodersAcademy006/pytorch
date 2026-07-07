@@ -1,0 +1,169 @@
+name: riscv-build-test
+
+# Real PyTorch build + test infra, cross-compiled for riscv64, instead of the
+# synthetic .ci/riscv/run_riscv_ci.py harness: .ci/pytorch/build.sh already
+# has a real riscv64-cross branch (crossenv, CMAKE_CROSSCOMPILING), and
+# test/run_test.py already has real test selection + JUnit generation
+# (--save-xml / TEST_SAVE_XML). This workflow runs those directly instead of
+# reimplementing either.
+
+on:
+  push:
+    branches:
+      - "**"
+    paths:
+      - ".github/workflows/riscv-build-test.yml"
+      - ".ci/docker/ubuntu-cross-riscv/**"
+      - ".ci/pytorch/build.sh"
+      - ".ci/pytorch/common.sh"
+      - ".ci/pytorch/common-build.sh"
+      - "aten/**"
+      - "c10/**"
+      - "cmake/**"
+      - "torch/**"
+      - "CMakeLists.txt"
+      - "setup.py"
+  pull_request:
+    paths:
+      - ".github/workflows/riscv-build-test.yml"
+      - ".ci/docker/ubuntu-cross-riscv/**"
+      - ".ci/pytorch/build.sh"
+      - ".ci/pytorch/common.sh"
+      - ".ci/pytorch/common-build.sh"
+      - "aten/**"
+      - "c10/**"
+      - "cmake/**"
+      - "torch/**"
+      - "CMakeLists.txt"
+      - "setup.py"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  cross-build-and-test:
+    name: cross-build-and-test
+    runs-on: ubuntu-24.04
+    timeout-minutes: 350
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Environment summary + free disk space
+        shell: bash
+        run: |
+          mkdir -p artifacts/build-test/logs
+          {
+            echo "# Environment"
+            echo '```'
+            nproc; free -h; df -h
+            echo '```'
+          } | tee artifacts/build-test/logs/environment.md >> "${GITHUB_STEP_SUMMARY}"
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /usr/local/share/boost "${AGENT_TOOLSDIRECTORY:-/opt/hostedtoolcache}" \
+            /usr/local/.ghcup /opt/az /usr/lib/jvm || true
+          docker image prune -af || true
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: riscv64
+
+      - name: Build (or reuse cached) cross-compile image
+        shell: bash
+        run: |
+          docker buildx build \
+            --load \
+            --progress plain \
+            --cache-from type=gha,scope=riscv-cross \
+            --cache-to type=gha,mode=max,scope=riscv-cross \
+            --build-arg UBUNTU_VERSION=24.04 \
+            --target final \
+            -f .ci/docker/ubuntu-cross-riscv/Dockerfile \
+            -t pytorch-riscv-cross:ci \
+            .ci/docker 2>&1 | tee artifacts/build-test/logs/docker-build.log
+
+      - name: Cross-build PyTorch (real .ci/pytorch/build.sh)
+        id: build
+        shell: bash
+        run: |
+          set +e
+          docker run --rm \
+            -e BUILD_ENVIRONMENT=linux-noble-riscv64-py3.12-gcc14-cross-build \
+            -e MAX_JOBS="$(nproc)" \
+            -v "${GITHUB_WORKSPACE}:/var/lib/jenkins/workspace" \
+            -w /var/lib/jenkins/workspace \
+            --user jenkins \
+            pytorch-riscv-cross:ci \
+            bash .ci/pytorch/build.sh \
+            2>&1 | tee artifacts/build-test/logs/build.log
+          echo "exit=${PIPESTATUS[0]}" >> "${GITHUB_OUTPUT}"
+
+      - name: Verify torch imports under QEMU
+        id: import
+        if: steps.build.outputs.exit == '0'
+        shell: bash
+        run: |
+          set +e
+          docker run --rm \
+            -v "${GITHUB_WORKSPACE}:/var/lib/jenkins/workspace" \
+            -w /var/lib/jenkins/workspace \
+            --user jenkins \
+            pytorch-riscv-cross:ci \
+            bash -lc 'source /opt/riscv-cross-env/bin/activate && qemu-riscv64 -L /opt/sysroot "$(which python3)" -c "import torch; print(torch.__version__); x = torch.arange(5); print(int(x.sum()))"' \
+            2>&1 | tee artifacts/build-test/logs/import-check.log
+          echo "exit=${PIPESTATUS[0]}" >> "${GITHUB_OUTPUT}"
+
+      - name: Run a minimal real test/run_test.py subset
+        id: test
+        if: steps.import.outputs.exit == '0'
+        shell: bash
+        run: |
+          set +e
+          mkdir -p artifacts/build-test/test-reports
+          docker run --rm \
+            -e PYTORCH_TEST_WITH_SLOW=0 \
+            -v "${GITHUB_WORKSPACE}:/var/lib/jenkins/workspace" \
+            -w /var/lib/jenkins/workspace \
+            --user jenkins \
+            pytorch-riscv-cross:ci \
+            bash -lc 'source /opt/riscv-cross-env/bin/activate && qemu-riscv64 -L /opt/sysroot "$(which python3)" test/run_test.py -i test_torch --save-xml test/test-reports -v' \
+            2>&1 | tee artifacts/build-test/logs/test.log
+          echo "exit=${PIPESTATUS[0]}" >> "${GITHUB_OUTPUT}"
+          cp -r test/test-reports artifacts/build-test/test-reports 2>/dev/null || true
+
+      - name: Record result
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo "# RISC-V real build + test"
+            echo
+            echo "- Build: \`${{ steps.build.outputs.exit || 'not run' }}\`"
+            echo "- Import check: \`${{ steps.import.outputs.exit || 'not run' }}\`"
+            echo "- Test subset: \`${{ steps.test.outputs.exit || 'not run' }}\`"
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: riscv64-build-test-${{ github.run_attempt }}
+          path: artifacts/build-test
+          if-no-files-found: warn
+
+      - name: Gate
+        shell: bash
+        run: |
+          test "${{ steps.build.outputs.exit }}" = "0" && \
+          test "${{ steps.import.outputs.exit }}" = "0" && \
+          test "${{ steps.test.outputs.exit }}" = "0"
