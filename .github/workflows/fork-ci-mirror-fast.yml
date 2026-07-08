@@ -56,6 +56,8 @@ jobs:
           python-version: "3.10"
       - name: Install lint deps
         run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libomp-dev
           pip install -r requirements.txt
           lintrunner init
       - env:
