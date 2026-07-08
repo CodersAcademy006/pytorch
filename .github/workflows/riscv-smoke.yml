@@ -1,0 +1,30 @@
+name: RISC-V Smoke Test
+
+on:
+  workflow_dispatch:
+
+jobs:
+  smoke:
+    runs-on: ubuntu-24.04-riscv
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: System Info
+        run: |
+          uname -a
+          uname -m
+          lscpu
+          cat /proc/cpuinfo
+
+      - name: GCC
+        run: |
+          gcc --version
+
+      - name: CMake
+        run: |
+          cmake --version
+
+      - name: Python
+        run: |
+          python3 --version
