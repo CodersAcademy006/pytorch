@@ -1,0 +1,79 @@
+name: riscv-pr-comment
+
+# Comment-triggered RISC-V validation for fork PRs.
+# Comment `/run-riscv` on a PR in this fork to run the same
+# cross/kernels/compiler/backend suites as riscv-test-my-pr.yml against
+# that PR's head, and post the result back as a PR comment.
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  run:
+    if: >
+      github.event.issue.pull_request &&
+      startsWith(github.event.comment.body, '/run-riscv') &&
+      contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: [cross, kernels, compiler, backend]
+        arch: [rv64gc]
+        include:
+          - suite: kernels
+            arch: rv64gcv
+    steps:
+      - name: Resolve PR head ref
+        id: pr
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          ref=$(gh pr view "${{ github.event.issue.number }}" --repo "${{ github.repository }}" --json headRefName --jq .headRefName)
+          echo "ref=${ref}" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.pr.outputs.ref }}
+
+      - name: Install public RISC-V toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            ccache clang cmake g++-riscv64-linux-gnu gcc-riscv64-linux-gnu \
+            ninja-build qemu-user qemu-user-static
+
+      - name: Run RISC-V suite
+        run: |
+          mkdir -p "artifacts/${{ matrix.suite }}-${{ matrix.arch }}"
+          python .ci/riscv/run_riscv_ci.py \
+            --suite "${{ matrix.suite }}" \
+            --arch "${{ matrix.arch }}" \
+            --artifact-dir "artifacts/${{ matrix.suite }}-${{ matrix.arch }}"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: riscv-pr-comment-${{ matrix.suite }}-${{ matrix.arch }}-${{ github.run_attempt }}
+          path: artifacts/${{ matrix.suite }}-${{ matrix.arch }}
+          if-no-files-found: error
+
+  report:
+    needs: run
+    if: always() && needs.run.result != 'skipped'
+    runs-on: ubuntu-24.04
+    permissions:
+      pull-requests: write
+    steps:
+      - env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh pr comment "${{ github.event.issue.number }}" --repo "${{ github.repository }}" --body \
+            "RISC-V fork CI: **${{ needs.run.result }}**
+          Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
