@@ -33,6 +33,14 @@ jobs:
           lintrunner init
 
       - name: Run upstream's own lintrunner.sh (lint + codegen + PYREFLY)
+        # GHA/NO_WORKFLOWS_ON_FORK requires every job to gate on
+        # `github.repository_owner == 'pytorch'` -- exactly the guard our
+        # fork-only workflows (riscv64.yml, fork-ci-mirror-*.yml) deliberately
+        # omit so they actually run here. Real conflict, not a bug: skip only
+        # this one linter, everything else (CODESPELL/PYFMT/CLANGFORMAT/
+        # FLAKE8/CLANGTIDY/PYREFLY/etc.) still runs at full upstream fidelity.
+        env:
+          ADDITIONAL_LINTRUNNER_ARGS: "--skip GHA"
         run: .github/scripts/lintrunner.sh
 
   cmake-configure:
