@@ -1,0 +1,122 @@
+name: riscv-native-build-comment
+
+# Native (non-QEMU) PyTorch build+test on the RISE riscv64 runner, comment-triggered.
+#
+# `/run-riscv-preflight` -- fast (~minutes): reports real hardware limits
+#   (cores/RAM/disk), toolchain versions, and whether key build deps
+#   (numpy, pyyaml, etc.) have riscv64 wheels on PyPI or must build from
+#   source. Run this first -- the actual build time depends entirely on
+#   what it finds.
+#
+# `/run-riscv-full-build` -- the real thing: `pip install -e . -v
+# --no-build-isolation` (per repo CLAUDE.md, the only sanctioned build
+# command) on native riscv64, then `python test/test_torch.py`. Can take
+# many hours on a 4-core board; only run after preflight looks sane.
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  preflight:
+    if: >
+      github.event.issue.pull_request &&
+      startsWith(github.event.comment.body, '/run-riscv-preflight') &&
+      contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association)
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: refs/pull/${{ github.event.issue.number }}/head
+
+      - name: Hardware + toolchain
+        id: info
+        run: |
+          {
+            echo "### Hardware"
+            echo '```'
+            uname -a
+            nproc
+            free -h
+            df -h /
+            echo "### Toolchain"
+            gcc --version | head -1
+            cmake --version | head -1
+            python3 --version
+            pip3 --version
+            echo '```'
+          } | tee report.md
+
+      - name: Key build-dep wheel availability (riscv64)
+        run: |
+          {
+            echo "### riscv64 wheel availability (pip download, no build)"
+            echo '```'
+            python3 -m venv /tmp/probe
+            source /tmp/probe/bin/activate
+            for pkg in numpy pyyaml typing_extensions sympy filelock jinja2 fsspec networkx; do
+              if pip download --no-deps --dest /tmp/wheelcheck "$pkg" 2>&1 | tail -1 | grep -qi "\.whl"; then
+                echo "$pkg: WHEEL"
+              else
+                echo "$pkg: SDIST (builds from source)"
+              fi
+            done
+            echo '```'
+          } | tee -a report.md
+
+      - name: Post report
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh pr comment "${{ github.event.issue.number }}" --repo "${{ github.repository }}" --body-file report.md
+
+  full-build:
+    if: >
+      github.event.issue.pull_request &&
+      startsWith(github.event.comment.body, '/run-riscv-full-build') &&
+      contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association)
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 1440
+    env:
+      USE_CUDA: "0"
+      USE_DISTRIBUTED: "0"
+      BUILD_TEST: "0"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: refs/pull/${{ github.event.issue.number }}/head
+          submodules: recursive
+
+      - name: Toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake ninja-build python3-dev python3-venv git
+
+      - name: Build (pip install -e . -v --no-build-isolation)
+        run: |
+          python3 -m venv .venv
+          source .venv/bin/activate
+          pip install -U pip
+          pip install -r requirements.txt
+          MAX_JOBS="$(nproc)" pip install -e . -v --no-build-isolation
+
+      - name: Test (test/test_torch.py)
+        run: |
+          source .venv/bin/activate
+          python test/test_torch.py -v
+
+      - name: Post result
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh pr comment "${{ github.event.issue.number }}" --repo "${{ github.repository }}" --body \
+            "Native riscv64 full build+test: **${{ job.status }}**
+          Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
