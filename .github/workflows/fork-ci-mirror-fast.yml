@@ -22,6 +22,8 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
       - uses: actions/setup-python@v5
         with:
@@ -40,7 +42,7 @@ jobs:
         # this one linter, everything else (CODESPELL/PYFMT/CLANGFORMAT/
         # FLAKE8/CLANGTIDY/PYREFLY/etc.) still runs at full upstream fidelity.
         env:
-          ADDITIONAL_LINTRUNNER_ARGS: "--skip GHA"
+          ADDITIONAL_LINTRUNNER_ARGS: "--skip NO_WORKFLOWS_ON_FORK"
         run: .github/scripts/lintrunner.sh
 
   cmake-configure:
