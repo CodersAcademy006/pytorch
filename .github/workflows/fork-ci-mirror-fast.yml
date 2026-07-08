@@ -1,0 +1,73 @@
+name: fork-ci-mirror-fast
+
+# Fast Level-1 mirror jobs: same checks upstream's lint.yml runs (lintrunner,
+# which covers lint + PYREFLY [mypy-equivalent] + NATIVEFUNCTIONS/codegen
+# consistency), a cmake-configure-only sanity check, and a Level-2 sanity
+# check that PyTorch's real (public, no-auth) GHCR CI images are pullable.
+# Heavier full-build matrix (gcc/clang/python-matrix/windows/macos/arm) lives
+# in fork-ci-mirror-build.yml since those take real wall-clock time.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  lint-codegen-mypy:
+    # Mirrors upstream lint.yml's lintrunner-noclang job (lint + PYREFLY +
+    # regenerate-type-stubs codegen-drift check), just on ubuntu-latest
+    # instead of PyTorch's self-hosted linux.24_04.4x.
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install lint deps
+        run: |
+          pip install -r requirements.txt
+          lintrunner init
+
+      - name: Run upstream's own lintrunner.sh (lint + codegen + PYREFLY)
+        run: .github/scripts/lintrunner.sh
+
+  cmake-configure:
+    # CMake-only sanity: catches CMakeLists.txt errors in seconds without a
+    # full compile.
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: cmake configure only
+        run: |
+          mkdir -p build
+          cmake -S . -B build -GNinja -DBUILD_TEST=0 -DBUILD_PYTHON=0 -DUSE_CUDA=0 -DUSE_DISTRIBUTED=0
+
+  ghcr-image-sanity:
+    # Level 2: PyTorch mirrors every real CI docker image to public GHCR
+    # (ghcr.io/pytorch/ci-image), no ECR auth needed. Confirm a representative
+    # x86 image and the riscv64 cross-build image both pull without auth.
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        image:
+          - pytorch-linux-jammy-py3.10-clang18
+          - pytorch-linux-jammy-py3.10-gcc11
+          - pytorch-linux-noble-riscv64-py3.12-gcc14-cross-build
+    steps:
+      - name: Pull public GHCR image (no auth)
+        run: docker pull "ghcr.io/pytorch/ci-image:${{ matrix.image }}"
+
+      - name: Sanity-check toolchain inside image
+        run: |
+          docker run --rm "ghcr.io/pytorch/ci-image:${{ matrix.image }}" \
+            bash -lc 'gcc --version 2>/dev/null | head -1; clang --version 2>/dev/null | head -1; python3 --version 2>/dev/null'
