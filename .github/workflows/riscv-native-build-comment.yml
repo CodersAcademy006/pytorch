@@ -53,17 +53,19 @@ jobs:
           } | tee report.md
 
       - name: Key build-dep wheel availability (riscv64)
+        timeout-minutes: 5
         run: |
           {
             echo "### riscv64 wheel availability (pip download, no build)"
             echo '```'
-            python3 -m venv /tmp/probe
+            timeout 60 python3 -m venv /tmp/probe
             source /tmp/probe/bin/activate
+            pip --default-timeout=20 install -q --upgrade pip
             for pkg in numpy pyyaml typing_extensions sympy filelock jinja2 fsspec networkx; do
-              if pip download --no-deps --dest /tmp/wheelcheck "$pkg" 2>&1 | tail -1 | grep -qi "\.whl"; then
+              if timeout 30 pip --default-timeout=20 download --no-deps --dest /tmp/wheelcheck "$pkg" 2>&1 | tail -1 | grep -qi "\.whl"; then
                 echo "$pkg: WHEEL"
               else
-                echo "$pkg: SDIST (builds from source)"
+                echo "$pkg: SDIST (builds from source) or timed out"
               fi
             done
             echo '```'
