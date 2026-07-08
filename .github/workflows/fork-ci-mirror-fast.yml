@@ -14,35 +14,71 @@ on:
   workflow_dispatch:
 
 jobs:
-  lint-codegen-mypy:
-    # Mirrors upstream lint.yml's lintrunner-noclang job (lint + PYREFLY +
-    # regenerate-type-stubs codegen-drift check), just on ubuntu-latest
-    # instead of PyTorch's self-hosted linux.24_04.4x.
+  # Mirrors upstream lint.yml's real 3-way split exactly (lintrunner-noclang /
+  # lintrunner-clang / lintrunner-pyrefly), just on ubuntu-latest instead of
+  # PyTorch's self-hosted linux.24_04.4x. NO_WORKFLOWS_ON_FORK is skipped in
+  # all three: it requires every job to gate on
+  # `github.repository_owner == 'pytorch'`, exactly the guard our fork-only
+  # workflows (riscv64.yml, fork-ci-mirror-*.yml) deliberately omit so they
+  # actually run here. Real conflict, not a bug.
+  lintrunner-noclang:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
-
       - uses: actions/setup-python@v5
         with:
           python-version: "3.10"
-
       - name: Install lint deps
         run: |
           pip install -r requirements.txt
           lintrunner init
+      - env:
+          ADDITIONAL_LINTRUNNER_ARGS: "--skip CLANGTIDY,CLANGTIDY_EXECUTORCH_COMPATIBILITY,CLANGFORMAT,PYREFLY,NO_WORKFLOWS_ON_FORK --all-files"
+        run: .github/scripts/lintrunner.sh
 
-      - name: Run upstream's own lintrunner.sh (lint + codegen + PYREFLY)
-        # GHA/NO_WORKFLOWS_ON_FORK requires every job to gate on
-        # `github.repository_owner == 'pytorch'` -- exactly the guard our
-        # fork-only workflows (riscv64.yml, fork-ci-mirror-*.yml) deliberately
-        # omit so they actually run here. Real conflict, not a bug: skip only
-        # this one linter, everything else (CODESPELL/PYFMT/CLANGFORMAT/
-        # FLAKE8/CLANGTIDY/PYREFLY/etc.) still runs at full upstream fidelity.
-        env:
-          ADDITIONAL_LINTRUNNER_ARGS: "--skip NO_WORKFLOWS_ON_FORK"
+  lintrunner-clang:
+    # CLANG=1 makes lintrunner.sh run `spin regenerate-clangtidy-files` first,
+    # which CMake-configures a build/ dir so CLANGTIDY has compile_commands.json
+    # to work with -- that's the real static-analysis check.
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      CLANG: "1"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      - name: Install lint deps
+        run: |
+          pip install -r requirements.txt
+          lintrunner init
+      - env:
+          ADDITIONAL_LINTRUNNER_ARGS: "--skip NO_WORKFLOWS_ON_FORK --all-files"
+        run: .github/scripts/lintrunner.sh
+
+  lintrunner-pyrefly:
+    # mypy-equivalent: pytorch replaced mypy with PYREFLY in .lintrunner.toml.
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      - name: Install lint deps
+        run: |
+          pip install -r requirements.txt
+          lintrunner init
+      - env:
+          ADDITIONAL_LINTRUNNER_ARGS: "--take PYREFLY --all-files"
         run: .github/scripts/lintrunner.sh
 
   cmake-configure:
