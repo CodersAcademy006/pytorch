@@ -1,0 +1,146 @@
+name: fork-ci-mirror-build
+
+# Level-1/3 mirror: real `pip install -e . -v --no-build-isolation` builds
+# (the only build command this repo's CLAUDE.md sanctions) across every
+# platform GitHub gives a public repo for free, plus a compiler-variant axis
+# on Linux (gcc/clang) and a Python-version axis. Manual trigger only
+# (workflow_dispatch) -- each cell is a full PyTorch compile, not something
+# to fire on every push.
+#
+# Real RISC-V build/test lives in riscv64.yml / riscv-pr-comment.yml
+# already -- not duplicated here.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  linux-matrix:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
+        compiler: [gcc, clang]
+    env:
+      USE_CUDA: "0"
+      USE_DISTRIBUTED: "0"
+      BUILD_TEST: "0"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Toolchain
+        run: |
+          sudo apt-get update
+          if [ "${{ matrix.compiler }}" = "clang" ]; then
+            sudo apt-get install -y --no-install-recommends clang
+            echo "CC=clang" >> "$GITHUB_ENV"
+            echo "CXX=clang++" >> "$GITHUB_ENV"
+          else
+            sudo apt-get install -y --no-install-recommends gcc g++
+            echo "CC=gcc" >> "$GITHUB_ENV"
+            echo "CXX=g++" >> "$GITHUB_ENV"
+          fi
+
+      - name: Build
+        run: |
+          pip install -r requirements.txt
+          MAX_JOBS="$(nproc)" pip install -e . -v --no-build-isolation
+
+      - name: Import sanity
+        run: python -c "import torch; print(torch.__version__)"
+
+      - name: Quick test slice
+        run: python test/test_torch.py -v -k "TestTorch and (add or sum)"
+
+  linux-arm:
+    # GitHub-hosted free ARM64 Linux runner for public repos.
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 350
+    env:
+      USE_CUDA: "0"
+      USE_DISTRIBUTED: "0"
+      BUILD_TEST: "0"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build
+        run: |
+          pip install -r requirements.txt
+          MAX_JOBS="$(nproc)" pip install -e . -v --no-build-isolation
+      - name: Import sanity
+        run: python -c "import torch; print(torch.__version__)"
+
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 350
+    env:
+      USE_CUDA: "0"
+      USE_DISTRIBUTED: "0"
+      BUILD_TEST: "0"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build
+        shell: bash
+        run: |
+          pip install -r requirements.txt
+          pip install -e . -v --no-build-isolation
+      - name: Import sanity
+        run: python -c "import torch; print(torch.__version__)"
+
+  macos:
+    runs-on: macos-14
+    timeout-minutes: 350
+    env:
+      USE_CUDA: "0"
+      USE_DISTRIBUTED: "0"
+      BUILD_TEST: "0"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build
+        run: |
+          pip install -r requirements.txt
+          MAX_JOBS="$(sysctl -n hw.ncpu)" pip install -e . -v --no-build-isolation
+      - name: Import sanity
+        run: python -c "import torch; print(torch.__version__)"
+
+  docs:
+    needs: linux-matrix
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      - name: Build torch + docs deps
+        run: |
+          pip install -r requirements.txt
+          MAX_JOBS="$(nproc)" pip install -e . -v --no-build-isolation
+          pip install -r docs/requirements.txt
+      - name: Build docs
+        run: |
+          cd docs
+          make html
