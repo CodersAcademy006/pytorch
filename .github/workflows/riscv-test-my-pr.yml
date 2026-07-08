@@ -1,0 +1,113 @@
+name: riscv-test-my-pr
+
+# On-demand: validate one specific ref against the existing riscv64 suites.
+# `ref` is either a plain PR number (fetched read-only from upstream
+# pytorch/pytorch, never pushed to) or a branch name in this fork.
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "PR number (upstream pytorch/pytorch) or branch name (this fork)"
+        required: true
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.inputs.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  actions: read
+
+env:
+  CCACHE_DIR: ${{ github.workspace }}/.ccache
+  RISCV_CXX: ccache riscv64-linux-gnu-g++
+
+jobs:
+  test-my-pr:
+    name: ${{ matrix.suite }}-${{ matrix.arch }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: [cross, kernels, compiler, backend]
+        arch: [rv64gc]
+        include:
+          - suite: kernels
+            arch: rv64gcv
+    steps:
+      - name: Checkout fork
+        uses: actions/checkout@v4
+
+      - name: Merge target ref onto this branch
+        shell: bash
+        run: |
+          # Merge (not checkout-replace) so the PR/branch's code changes land
+          # on top of this branch's own .ci/riscv/ harness -- an upstream PR
+          # ref doesn't have run_riscv_ci.py at all, so replacing the tree
+          # wholesale would delete the very harness this workflow runs.
+          git config user.email "riscv-ci-lab@localhost"
+          git config user.name "riscv-ci-lab"
+          ref="${{ github.event.inputs.ref }}"
+          if [[ "${ref}" =~ ^[0-9]+$ ]]; then
+            echo "Fetching upstream pytorch/pytorch PR #${ref} (read-only)"
+            git fetch https://github.com/pytorch/pytorch.git "pull/${ref}/head"
+          else
+            echo "Fetching fork ref ${ref}"
+            git fetch origin "${ref}"
+          fi
+          git merge --no-edit FETCH_HEAD
+
+      - name: Install public RISC-V toolchain
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            ccache clang cmake g++-riscv64-linux-gnu gcc-riscv64-linux-gnu \
+            ninja-build qemu-user qemu-user-static
+
+      - name: Restore compiler cache
+        uses: actions/cache@v4
+        with:
+          path: .ccache
+          key: riscv64-test-my-pr-${{ runner.os }}-${{ matrix.suite }}-${{ matrix.arch }}-${{ github.event.inputs.ref }}
+          restore-keys: |
+            riscv64-test-my-pr-${{ runner.os }}-${{ matrix.suite }}-${{ matrix.arch }}-
+            riscv64-${{ runner.os }}-${{ matrix.suite }}-${{ matrix.arch }}-
+            riscv64-${{ runner.os }}-
+
+      - name: Run RISC-V suite
+        shell: bash
+        run: |
+          mkdir -p "artifacts/${{ matrix.suite }}-${{ matrix.arch }}"
+          python .ci/riscv/run_riscv_ci.py \
+            --suite "${{ matrix.suite }}" \
+            --arch "${{ matrix.arch }}" \
+            --artifact-dir "artifacts/${{ matrix.suite }}-${{ matrix.arch }}"
+          ccache --show-stats | tee "artifacts/${{ matrix.suite }}-${{ matrix.arch }}/logs/ccache-stats.log"
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: riscv64-test-my-pr-${{ matrix.suite }}-${{ matrix.arch }}-${{ github.run_attempt }}
+          path: artifacts/${{ matrix.suite }}-${{ matrix.arch }}
+          if-no-files-found: error
+
+  summary:
+    name: summary
+    runs-on: ubuntu-24.04
+    needs: test-my-pr
+    if: always()
+    steps:
+      - name: Report
+        shell: bash
+        run: |
+          {
+            echo "# riscv-test-my-pr"
+            echo
+            echo "- Ref: \`${{ github.event.inputs.ref }}\`"
+            echo "- Result: \`${{ needs.test-my-pr.result }}\`"
+          } >> "${GITHUB_STEP_SUMMARY}"
+          test "${{ needs.test-my-pr.result }}" = "success"

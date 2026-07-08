@@ -3,44 +3,243 @@ name: riscv64
 
 on:
   push:
+    branches:
+      - "**"
     tags:
-      - ciflow/riscv64/*
+      - "ciflow/riscv64/*"
+    paths:
+      - ".ci/riscv/**"
+      - ".ci/docker/ubuntu-cross-riscv/**"
+      - ".ci/docker/build.sh"
+      - ".ci/pytorch/build.sh"
+      - ".github/workflows/riscv64.yml"
+      - "aten/**"
+      - "c10/**"
+      - "cmake/**"
+      - "torch/_dynamo/**"
+      - "torch/_inductor/**"
+      - "test/**"
+      - "tools/stats/**"
+      - "CMakeLists.txt"
+      - "setup.py"
+      - "pyproject.toml"
+  pull_request:
+    paths:
+      - ".ci/riscv/**"
+      - ".ci/docker/ubuntu-cross-riscv/**"
+      - ".ci/docker/build.sh"
+      - ".ci/pytorch/build.sh"
+      - ".github/workflows/riscv64.yml"
+      - "aten/**"
+      - "c10/**"
+      - "cmake/**"
+      - "torch/_dynamo/**"
+      - "torch/_inductor/**"
+      - "test/**"
+      - "tools/stats/**"
+      - "CMakeLists.txt"
+      - "setup.py"
+      - "pyproject.toml"
   workflow_dispatch:
+    inputs:
+      arch:
+        description: RISC-V ISA string
+        required: false
+        default: rv64gc
+        type: choice
+        options:
+          - rv64gc
+          - rv64gcv
+      suite:
+        description: Suite to run
+        required: false
+        default: all
+        type: choice
+        options:
+          - all
+          - cross
+          - kernels
+          - compiler
+          - backend
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}-${{ github.event_name == 'workflow_dispatch' }}
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name }}
   cancel-in-progress: true
 
 permissions:
-  id-token: write
   contents: read
   actions: read
 
-jobs:
-  get-label-type:
-    name: get-label-type
-    uses: pytorch/pytorch/.github/workflows/_runner-determinator.yml@main
-    if: ${{ (github.event_name != 'schedule' || github.repository == 'pytorch/pytorch') && github.repository_owner == 'pytorch' }}
-    with:
-      triggering_actor: ${{ github.triggering_actor }}
-      issue_owner: ${{ github.event.pull_request.user.login || github.event.issue.user.login }}
-      curr_branch: ${{ github.head_ref || github.ref_name }}
-      curr_ref_type: ${{ github.ref_type }}
-      check_experiments: arc,lf
+env:
+  CCACHE_DIR: ${{ github.workspace }}/.ccache
+  RISCV_CXX: ccache riscv64-linux-gnu-g++
 
-  pytorch-linux-noble-riscv64-py3_12-gcc14-cross-build:
-    if: github.repository_owner == 'pytorch'
-    name: pytorch-linux-noble-riscv64-py3_12-gcc14-cross-build
-    uses: ./.github/workflows/_linux-build.yml
-    needs: get-label-type
-    with:
-      runner_prefix: "${{ needs.get-label-type.outputs.label-type }}"
-      build-environment: linux-noble-riscv64-py3.12-gcc14
-      docker-image-name: ci-image:pytorch-linux-noble-riscv64-py3.12-gcc14-cross-build
-      ci-docker-hash: ${{ needs.get-label-type.outputs.ci-docker-hash }}
-      runner: linux.c7i.2xlarge
-      use-arc: true
-      python-version: "3.12"
-      compiler: gcc14
-      cuda-version: cpu
-    secrets: inherit
+jobs:
+  impact-analysis:
+    name: impact-analysis
+    runs-on: ubuntu-24.04
+    if: github.event_name != 'workflow_dispatch'
+    outputs:
+      run_cross: ${{ steps.analyze.outputs.run_cross }}
+      run_kernels: ${{ steps.analyze.outputs.run_kernels }}
+      run_compiler: ${{ steps.analyze.outputs.run_compiler }}
+      run_backend: ${{ steps.analyze.outputs.run_backend }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 50
+
+      - name: Analyze impact
+        id: analyze
+        shell: bash
+        run: |
+          base="${{ github.event.pull_request.base.sha || github.event.before }}"
+          if [[ -z "${base}" || "${base}" =~ ^0+$ ]]; then
+            base="HEAD~1"
+          fi
+          python .ci/riscv/impact_analysis.py --base "${base}" --head "${{ github.sha }}"
+
+  riscv-validation:
+    name: ${{ matrix.suite }}-${{ matrix.arch }}
+    needs: impact-analysis
+    if: ${{ !cancelled() && needs.impact-analysis.result != 'failure' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: [cross, kernels, compiler, backend]
+        arch: [rv64gc]
+        include:
+          - suite: kernels
+            arch: rv64gcv
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Select run scope
+        id: scope
+        shell: bash
+        env:
+          RUN_CROSS: ${{ needs.impact-analysis.outputs.run_cross }}
+          RUN_KERNELS: ${{ needs.impact-analysis.outputs.run_kernels }}
+          RUN_COMPILER: ${{ needs.impact-analysis.outputs.run_compiler }}
+          RUN_BACKEND: ${{ needs.impact-analysis.outputs.run_backend }}
+        run: |
+          requested_suite="${{ github.event.inputs.suite || 'all' }}"
+          requested_arch="${{ github.event.inputs.arch || 'rv64gc' }}"
+          should_run=true
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            # Manual dispatch is the explicit "force" escape hatch: it always
+            # bypasses impact analysis and runs exactly what was requested.
+            if [[ "${requested_suite}" != "all" && "${requested_suite}" != "${{ matrix.suite }}" ]]; then
+              should_run=false
+            fi
+            if [[ "${requested_arch}" != "${{ matrix.arch }}" ]]; then
+              should_run=false
+            fi
+          else
+            varname="RUN_$(echo "${{ matrix.suite }}" | tr '[:lower:]' '[:upper:]')"
+            impact_flag="${!varname:-true}"
+            if [[ "${impact_flag}" == "false" ]]; then
+              should_run=false
+            fi
+          fi
+          echo "should-run=${should_run}" >> "${GITHUB_OUTPUT}"
+          if [[ "${should_run}" == "false" ]]; then
+            echo "- \`${{ matrix.suite }}-${{ matrix.arch }}\` skipped: impact analysis found no changes affecting this suite" >> "${GITHUB_STEP_SUMMARY}"
+          fi
+
+      - name: Install public RISC-V toolchain
+        if: steps.scope.outputs.should-run == 'true'
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            ccache \
+            clang \
+            cmake \
+            g++-riscv64-linux-gnu \
+            gcc-riscv64-linux-gnu \
+            ninja-build \
+            qemu-user \
+            qemu-user-static
+
+      - name: Restore compiler cache
+        if: steps.scope.outputs.should-run == 'true'
+        uses: actions/cache@v4
+        with:
+          path: .ccache
+          key: riscv64-${{ runner.os }}-${{ matrix.suite }}-${{ matrix.arch }}-${{ hashFiles('.ci/riscv/**', 'c10/**', 'aten/**', 'torch/_inductor/**') }}
+          restore-keys: |
+            riscv64-${{ runner.os }}-${{ matrix.suite }}-${{ matrix.arch }}-
+            riscv64-${{ runner.os }}-
+
+      - name: Run RISC-V suite
+        if: steps.scope.outputs.should-run == 'true'
+        shell: bash
+        run: |
+          mkdir -p "artifacts/${{ matrix.suite }}-${{ matrix.arch }}"
+          python .ci/riscv/run_riscv_ci.py \
+            --suite "${{ matrix.suite }}" \
+            --arch "${{ matrix.arch }}" \
+            --artifact-dir "artifacts/${{ matrix.suite }}-${{ matrix.arch }}"
+          ccache --show-stats | tee "artifacts/${{ matrix.suite }}-${{ matrix.arch }}/logs/ccache-stats.log"
+
+      - name: Upload RISC-V artifacts
+        if: always() && steps.scope.outputs.should-run == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: riscv64-${{ matrix.suite }}-${{ matrix.arch }}-${{ github.run_attempt }}
+          path: artifacts/${{ matrix.suite }}-${{ matrix.arch }}
+          if-no-files-found: error
+
+  riscv-summary:
+    name: summary
+    runs-on: ubuntu-24.04
+    needs: riscv-validation
+    if: always()
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download RISC-V matrix artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: riscv64-*-${{ github.run_attempt }}
+          path: artifacts
+        continue-on-error: true
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Aggregate JUnit results and regenerate test-times.json
+        shell: bash
+        run: |
+          {
+            echo "# RISC-V personal CI"
+            echo
+            echo "- Workflow: \`${{ github.workflow }}\`"
+            echo "- Ref: \`${{ github.ref }}\`"
+            echo "- Matrix result: \`${{ needs.riscv-validation.result }}\`"
+            echo
+          } >> "${GITHUB_STEP_SUMMARY}"
+          python .ci/riscv/aggregate_summary.py \
+            --artifacts-dir artifacts \
+            --output-dir artifacts/_rollup \
+            --job-name riscv64
+
+      - name: Upload rollup and canonical test-times.json
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: riscv64-test-times-${{ github.run_attempt }}
+          path: artifacts/_rollup
+          if-no-files-found: warn
+
+      - name: Gate on matrix result
+        shell: bash
+        run: test "${{ needs.riscv-validation.result }}" = "success"
