@@ -146,8 +146,14 @@ ENV PATH="/usr/local/bin:${PATH}"
 
 # Set up cross Python environment
 SHELL ["/bin/bash", "-c"]
+# numpy pinned to the last pre-meson release (1.26.4): pyproject.toml's
+# build-system requires an unpinned "numpy", but latest numpy (2.x) needs
+# Cython at build time for its meson backend, which the crossenv build-python
+# split doesn't expose correctly. 1.26.4 ships pre-cythonized .c sources and
+# builds via plain setup.py/distutils -- no Cython needed.
 RUN source /opt/riscv-cross-env/bin/activate \
-    && pip install setuptools pyyaml typing_extensions wheel build
+    && pip install setuptools pyyaml typing_extensions wheel build \
+       ninja numpy==1.26.4 six requests "cmake>=3.27"
 
 # Set default environment variables for PyTorch build
 ENV Python_ROOT_DIR=${SYSROOT}
