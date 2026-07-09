@@ -269,7 +269,15 @@ if [[ "$BUILD_ENVIRONMENT" != *libtorch* ]]; then
     if [[ "$BUILD_ENVIRONMENT" == *xla* ]]; then
       source .ci/pytorch/install_cache_xla.sh
     fi
-    python -m build --wheel --no-isolation
+    if [[ "$BUILD_ENVIRONMENT" == *riscv64* ]]; then
+      # Cross build: cmake/ninja are host tools on PATH, not cross-python
+      # distributions, and have no riscv64 wheels, so build's strict
+      # [build-system] dependency check cannot be satisfied. Skip it; the
+      # actual build uses the host cmake/ninja binaries.
+      python -m build --wheel --no-isolation --skip-dependency-check
+    else
+      python -m build --wheel --no-isolation
+    fi
   fi
   pip_install_whl "$(echo dist/*.whl)"
 
