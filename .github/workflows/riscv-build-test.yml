@@ -70,27 +70,42 @@ jobs:
             /usr/local/.ghcup /opt/az /usr/lib/jvm || true
           docker image prune -af || true
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
         with:
           platforms: riscv64
 
-      - name: Build (or reuse cached) cross-compile image
+      - name: Pull PyTorch's real RISC-V cross-build image (never build our own)
         shell: bash
         run: |
-          docker buildx build \
-            --load \
-            --progress plain \
-            --cache-from type=gha,scope=riscv-cross \
-            --cache-to type=gha,mode=max,scope=riscv-cross \
-            --build-arg UBUNTU_VERSION=24.04 \
-            --target final \
-            -f .ci/docker/ubuntu-cross-riscv/Dockerfile \
-            -t pytorch-riscv-cross:ci \
-            .ci/docker 2>&1 | tee artifacts/build-test/logs/docker-build.log
+          set -euxo pipefail
+          # Replicate upstream exactly: PyTorch tags its CI images
+          # <image-name>-<git-tree-hash-of-.ci/docker> (see pytorch/pytorch
+          # .github/actions/binary-docker-build: CI_FOLDER_SHA=git rev-parse
+          # HEAD:.ci/docker) and mirrors them to the public GHCR. We pull that
+          # prebuilt image instead of building from our Dockerfile, so the
+          # crossenv/toolchain is upstream's known-good one and none of our own
+          # image-build errors can occur -- same as upstream's test jobs, which
+          # only ever pull.
+          NAME=pytorch-linux-noble-riscv64-py3.12-gcc14-cross-build
+          git remote add upstream https://github.com/pytorch/pytorch.git 2>/dev/null || true
+          git fetch --depth=50 upstream main
+          TOKEN=$(curl -s "https://ghcr.io/token?scope=repository:pytorch/ci-image:pull&service=ghcr.io" \
+            | python3 -c 'import sys,json; print(json.load(sys.stdin)["token"])')
+          tag=""
+          for c in $(git log -30 --format=%H upstream/main -- .ci/docker); do
+            h=$(git rev-parse "$c:.ci/docker")
+            code=$(curl -s -o /dev/null -w "%{http_code}" -H "Authorization: Bearer $TOKEN" \
+              -H "Accept: application/vnd.docker.distribution.manifest.v2+json" \
+              -H "Accept: application/vnd.oci.image.index.v1+json" \
+              "https://ghcr.io/v2/pytorch/ci-image/manifests/$NAME-$h")
+            if [ "$code" = "200" ]; then tag="$NAME-$h"; break; fi
+          done
+          # Fail loudly rather than silently building a divergent local image.
+          test -n "$tag"
+          echo "Using ghcr.io/pytorch/ci-image:$tag"
+          docker pull "ghcr.io/pytorch/ci-image:$tag"
+          docker tag "ghcr.io/pytorch/ci-image:$tag" pytorch-riscv-cross:ci
 
       - name: Cross-build + verify import + test (single container run)
         shell: bash
