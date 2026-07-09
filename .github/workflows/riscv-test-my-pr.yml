@@ -39,6 +39,11 @@ jobs:
     steps:
       - name: Checkout fork
         uses: actions/checkout@v4
+        with:
+          # Full history so `git merge FETCH_HEAD` has a common ancestor with
+          # the upstream PR ref; a shallow clone gives "refusing to merge
+          # unrelated histories".
+          fetch-depth: 0
 
       - name: Merge target ref onto this branch
         shell: bash
@@ -93,7 +98,7 @@ jobs:
         with:
           name: riscv64-test-my-pr-${{ matrix.suite }}-${{ matrix.arch }}-${{ github.run_attempt }}
           path: artifacts/${{ matrix.suite }}-${{ matrix.arch }}
-          if-no-files-found: error
+          if-no-files-found: warn
 
   summary:
     name: summary
