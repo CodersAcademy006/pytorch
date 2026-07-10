@@ -1015,7 +1015,12 @@ def mm_plus_mm(match: Match, mat1, mat2, mat3, mat4):
 def pointless_cumsum_replacement(match: Match, shape, fill_value, device, dtype, dim):
     """Based on a pattern in OPTForCausalLM"""
 
-    if is_integer_dtype(dtype) or is_boolean_dtype(dtype):
+    # An explicit dtype= on cumsum overrides the input dtype (and the int64
+    # promotion below); the pattern only captures the input full()'s dtype.
+    explicit_dtype = match.output_node().kwargs.get("dtype")
+    if explicit_dtype is not None:
+        dtype = explicit_dtype
+    elif is_integer_dtype(dtype) or is_boolean_dtype(dtype):
         # cumsum promotes all integral types to int64
         dtype = torch.int64
 
