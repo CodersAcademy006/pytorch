@@ -79,6 +79,7 @@ from torch.testing._internal.common_utils import (
     IS_X86,
     load_tests,
     MI200_ARCH,
+    MI350_ARCH,
     parametrize,
     recover_orig_fp32_precision,
     run_tests,
@@ -2156,9 +2157,9 @@ if __name__ == '__main__':
         counted = t.bincount(minlength=65536)
         self.assertEqual(torch.sum(counted), 10)
 
-    @skipIfRocm(
-        msg="gfx950 SIGFPEs in histogram sizing at nbins > INT_MAX; fix is exercised on CUDA"
-    )
+    # gfx950 (MI350) SIGFPEs in histogram sizing at nbins > INT_MAX; the int32
+    # overflow fix is still exercised on CUDA and other ROCm archs.
+    @skipIfRocmArch(MI350_ARCH)
     @largeTensorTest("18GB", "cuda")
     @serialTest()
     def test_bincount_int32_overflow(self):
