@@ -35,9 +35,12 @@ jobs:
           python3 -m venv .venv
           . .venv/bin/activate
           pip install -U pip
-          # extra-index so ordinary deps still resolve from PyPI; pip prefers the
-          # riscv64 wheel over any sdist.
-          pip install --extra-index-url "$RUYI_INDEX" llvmlite
+          # index-url (not extra-index-url) and a pinned version: with both
+          # indexes visible pip picks the highest version, which is PyPI's 0.48.0
+          # sdist, and building that needs an LLVM 22 install we do not have.
+          # 0.47.0 is the newest RuyiRepo riscv64 wheel with a cp312 build.
+          # llvmlite has no runtime deps, so restricting the index is safe.
+          pip install -i "$RUYI_INDEX" "llvmlite==0.47.0"
           pip list | grep -i llvmlite
 
       - name: llvmlite JIT probe
@@ -87,19 +90,25 @@ jobs:
           set -o pipefail
           timeout 3600 python -m llvmlite.tests 2>&1 | tail -45
 
-      - name: numba (riscv64 wheels are cp314 only; best effort)
+      - name: numba (RuyiRepo riscv64 wheels are cp314 only; runner is cp312)
         continue-on-error: true
         run: |
           . .venv/bin/activate
-          pip install --extra-index-url "$RUYI_INDEX" numba 2>&1 | tail -12
+          # Expected to find nothing: every RuyiRepo numba riscv64 wheel is cp314,
+          # and stock Ubuntu 24.04 ships python 3.12. Recording the exact failure
+          # is the point, so pin rather than let pip fall back to a PyPI sdist.
+          pip install -i "$RUYI_INDEX" "numba==0.64.0" 2>&1 | tail -12 || true
           python - <<'PY'
-          import numba
-          from numba import njit
-          @njit
-          def f(a, b):
-              return a + b
-          print("numba version   :", numba.__version__)
-          print("njit f(1,2)     :", f(1, 2))
+          try:
+              import numba
+              from numba import njit
+              @njit
+              def f(a, b):
+                  return a + b
+              print("numba version   :", numba.__version__)
+              print("njit f(1,2)     :", f(1, 2))
+          except Exception as e:
+              print("numba unavailable:", type(e).__name__, e)
           PY
 
       - name: Post result
