@@ -47,40 +47,46 @@ jobs:
         run: |
           . .venv/bin/activate
           python - <<'PY'
-          import llvmlite, llvmlite.binding as llvm
-          print("llvmlite version:", llvmlite.__version__)
-          llvm.initialize()
-          llvm.initialize_native_target()
-          llvm.initialize_native_asmprinter()
-          print("default triple  :", llvm.get_default_triple())
-          print("orcjit exported :", hasattr(llvm, "create_lljit_compiler"))
+          import ctypes
+          from importlib.metadata import version
+          import llvmlite.binding as llvm
 
-          # Compile and JIT-execute a real function through the OrcJIT/LLJIT path,
-          # which is precisely what RuntimeDyld could not do on RISC-V.
-          asm = r"""
-          ; ModuleID = "probe"
+          print("llvmlite version:", version("llvmlite"))
+          # 0.47 removed binding.initialize(); LLVM init is automatic now.
+          print("default triple  :", llvm.get_default_triple())
+          print("jit api present :", sorted(n for n in dir(llvm) if "jit" in n.lower()))
+
+          triple = llvm.get_default_triple()
+          asm = f'''
           target triple = "{triple}"
           define i32 @add(i32 %a, i32 %b) {{
           entry:
             %r = add i32 %a, %b
             ret i32 %r
           }}
-          """.format(triple=llvm.get_default_triple())
+          '''
           mod = llvm.parse_assembly(asm)
           mod.verify()
           print("module verified : ok")
-          try:
-              lljit = llvm.create_lljit_compiler()
-              rt = lljit.add_ir_module(llvm.parse_assembly(asm))
-              lljit.finalize_object() if hasattr(lljit, "finalize_object") else None
-              addr = lljit.lookup("add")
-              print("LLJIT lookup    : ok ->", hex(addr.address if hasattr(addr, "address") else int(addr)))
-              import ctypes
-              fn = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_int, ctypes.c_int)(
-                  addr.address if hasattr(addr, "address") else int(addr))
-              print("LLJIT add(2,3)  :", fn(2, 3))
-          except Exception as e:
-              print("LLJIT FAILED    :", type(e).__name__, e)
+
+          # Emit real riscv64 machine code. If the backend were broken this dies.
+          target = llvm.Target.from_triple(triple)
+          tm = target.create_target_machine()
+          obj = tm.emit_object(mod)
+          print("codegen         : ok,", len(obj), "bytes of object code")
+
+          # Now the actual open question: does the JIT (OrcJIT/LLJIT, which
+          # replaced the RuntimeDyld path that lacked RISC-V) execute on riscv64?
+          lljit = llvm.create_lljit_compiler(tm)
+          rt = lljit.add_ir_module(llvm.parse_assembly(asm))
+          addr = lljit.lookup("add")
+          ptr = getattr(addr, "address", None) or int(addr)
+          print("LLJIT lookup    : ok ->", hex(ptr))
+          fn = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_int, ctypes.c_int)(ptr)
+          got = fn(2, 3)
+          print("LLJIT add(2,3)  :", got)
+          assert got == 5, f"JIT returned {got}, expected 5"
+          print("RESULT          : JIT EXECUTES CORRECTLY ON riscv64")
           PY
 
       - name: llvmlite test suite
