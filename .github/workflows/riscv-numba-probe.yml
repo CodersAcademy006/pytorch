@@ -68,27 +68,38 @@ jobs:
           llvm.parse_assembly(asm).verify()
           print("ir parse+verify : ok")
 
-          # llvmlite ships its own JIT smoke check; use it rather than a
-          # hand-rolled one.
+          # 0.47 removed initialize(), but initialize_native_target() remains and
+          # is still required: without it the target registry is empty and
+          # create_lljit_compiler fails with "no targets are registered".
+          # Verified on an arm64 control host, so that error is not riscv-specific.
+          llvm.initialize_native_target()
+          llvm.initialize_native_asmprinter()
+          print("targets registered: ok")
+
           try:
               llvm.check_jit_execution()
               print("check_jit_execution: ok")
           except Exception as e:
               print("check_jit_execution: FAILED", type(e).__name__, e)
 
-          # The actual open question: does OrcJIT/LLJIT (which replaced the
-          # RuntimeDyld path that lacked RISC-V) execute real code on riscv64?
-          lljit = llvm.create_lljit_compiler()
-          lib = (llvm.JITLibraryBuilder()
-                 .add_ir(asm)
-                 .export_symbol("add")
-                 .link(lljit, "probe"))
-          ptr = lib["add"]
-          print("LLJIT symbol    : ok ->", hex(ptr))
-          got = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_int, ctypes.c_int)(ptr)(2, 3)
-          print("LLJIT add(2,3)  :", got)
-          assert got == 5, f"JIT returned {got}, expected 5"
-          print("RESULT          : ORCJIT EXECUTES CORRECTLY ON NATIVE riscv64")
+          # The 2023 assessment (numba/llvmlite#923) was that the binding layer
+          # does not work on RISC-V because MCJIT/RuntimeDyld lack RISC-V support,
+          # with OrcJIT as the way forward. llvmlite has since switched to
+          # JITLink. Test both relocation engines and report each separately.
+          for jitlink in (False, True):
+              label = "JITLink" if jitlink else "RuntimeDyld"
+              try:
+                  lljit = llvm.create_lljit_compiler(use_jit_link=jitlink)
+                  lib = (llvm.JITLibraryBuilder()
+                         .add_ir(asm)
+                         .export_symbol("add")
+                         .link(lljit, f"probe{int(jitlink)}"))
+                  ptr = lib["add"]
+                  got = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_int, ctypes.c_int)(ptr)(2, 3)
+                  ok = "OK" if got == 5 else f"WRONG (got {got})"
+                  print(f"  {label:12} -> add(2,3) = {got}  {ok}")
+              except Exception as e:
+                  print(f"  {label:12} -> FAILED {type(e).__name__}: {str(e)[:100]}")
           PY
 
       - name: llvmlite test suite
