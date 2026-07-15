@@ -109,10 +109,36 @@ jobs:
           pip install -r requirements.txt
           MAX_JOBS="$(nproc)" pip install -e . -v --no-build-isolation
 
+      - name: Test dependencies
+        run: |
+          source .venv/bin/activate
+          # torch.testing._internal.common_utils needs these; requirements.txt
+          # only covers the build, so test/test_torch.py cannot even import
+          # without them.
+          pip install expecttest hypothesis unittest-xml-reporting psutil pyyaml
+
+      - name: Smoke (import and real op)
+        run: |
+          source .venv/bin/activate
+          python - <<'PY'
+          import platform, torch
+          print("machine:", platform.machine())
+          print("torch  :", torch.__version__)
+          a = torch.randn(128, 128)
+          b = torch.randn(128, 128)
+          assert (a @ b).shape == (128, 128)
+          print("matmul : ok")
+          assert torch.arange(10, dtype=torch.float32).sum().item() == 45.0
+          print("reduce : ok")
+          PY
+
       - name: Test (test/test_torch.py)
         run: |
           source .venv/bin/activate
-          python test/test_torch.py -v
+          set -o pipefail
+          # Bounded: the full suite can outrun the job budget on a 4-core U74,
+          # and a timeout that yields nothing is worse than a partial result.
+          timeout 21600 python test/test_torch.py -v 2>&1 | tail -60
 
       - name: Post result
         if: always()
