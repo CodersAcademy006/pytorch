@@ -107,7 +107,19 @@ jobs:
         run: |
           . .venv/bin/activate
           set -o pipefail
-          timeout 3600 python -m llvmlite.tests 2>&1 | tail -45
+          timeout 3600 python -m llvmlite.tests 2>&1 | tail -20
+
+      - name: Verbose - markdryan's failing test and the full skip list
+        continue-on-error: true
+        run: |
+          . .venv/bin/activate
+          # numba/llvmlite#923: markdryan reported test_global_ctors_dtors
+          # failing on riscv64 with llvmlite 0.44 + LLVM 15. It lives in
+          # TestGlobalConstructors(TestMCJit). Show whether it runs and passes
+          # here on 0.47 + LLVM 22, and list every skip with its reason so the
+          # result cannot be over-read.
+          timeout 1800 python -m unittest llvmlite.tests.test_binding -v 2>&1 \
+            | grep -aiE "ctors|orcjit|skipped|^Ran |^OK|^FAILED" | head -40
 
       - name: numba (RuyiRepo riscv64 wheels are cp314 only; runner is cp312)
         continue-on-error: true
