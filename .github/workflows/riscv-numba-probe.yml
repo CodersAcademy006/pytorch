@@ -1,0 +1,112 @@
+## Comment `/run-numba-probe` on a PR in this fork to run it.
+##
+## Question this answers: llvmlite's riscv64 status (numba/llvmlite#923) has been
+## "binding layer does not work, MCJIT/RuntimeDyld lack RISC-V" since 2023. Since
+## then OrcJIT/JITLink landed and llvmlite moved to LLVM 22, and RuyiRepo now
+## publishes manylinux_2_38_riscv64 wheels daily. Nobody has re-tested on real
+## hardware. This does that.
+name: riscv-numba-probe
+
+on:
+  issue_comment:
+    types: [created]
+
+jobs:
+  probe:
+    if: >
+      github.event.issue.pull_request &&
+      startsWith(github.event.comment.body, '/run-numba-probe') &&
+      contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association)
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 120
+    env:
+      RUYI_INDEX: https://ruyirepo.ruyicommunity.cn/pypi/simple/
+    steps:
+      - name: Hardware and interpreter
+        run: |
+          uname -a
+          echo "cores: $(nproc)"
+          free -h || true
+          python3 --version
+          python3 -c "import sysconfig; print('platform tag:', sysconfig.get_platform())"
+
+      - name: Install llvmlite from RuyiRepo
+        run: |
+          python3 -m venv .venv
+          . .venv/bin/activate
+          pip install -U pip
+          # extra-index so ordinary deps still resolve from PyPI; pip prefers the
+          # riscv64 wheel over any sdist.
+          pip install --extra-index-url "$RUYI_INDEX" llvmlite
+          pip list | grep -i llvmlite
+
+      - name: llvmlite JIT probe
+        run: |
+          . .venv/bin/activate
+          python - <<'PY'
+          import llvmlite, llvmlite.binding as llvm
+          print("llvmlite version:", llvmlite.__version__)
+          llvm.initialize()
+          llvm.initialize_native_target()
+          llvm.initialize_native_asmprinter()
+          print("default triple  :", llvm.get_default_triple())
+          print("orcjit exported :", hasattr(llvm, "create_lljit_compiler"))
+
+          # Compile and JIT-execute a real function through the OrcJIT/LLJIT path,
+          # which is precisely what RuntimeDyld could not do on RISC-V.
+          asm = r"""
+          ; ModuleID = "probe"
+          target triple = "{triple}"
+          define i32 @add(i32 %a, i32 %b) {{
+          entry:
+            %r = add i32 %a, %b
+            ret i32 %r
+          }}
+          """.format(triple=llvm.get_default_triple())
+          mod = llvm.parse_assembly(asm)
+          mod.verify()
+          print("module verified : ok")
+          try:
+              lljit = llvm.create_lljit_compiler()
+              rt = lljit.add_ir_module(llvm.parse_assembly(asm))
+              lljit.finalize_object() if hasattr(lljit, "finalize_object") else None
+              addr = lljit.lookup("add")
+              print("LLJIT lookup    : ok ->", hex(addr.address if hasattr(addr, "address") else int(addr)))
+              import ctypes
+              fn = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_int, ctypes.c_int)(
+                  addr.address if hasattr(addr, "address") else int(addr))
+              print("LLJIT add(2,3)  :", fn(2, 3))
+          except Exception as e:
+              print("LLJIT FAILED    :", type(e).__name__, e)
+          PY
+
+      - name: llvmlite test suite
+        continue-on-error: true
+        run: |
+          . .venv/bin/activate
+          set -o pipefail
+          timeout 3600 python -m llvmlite.tests 2>&1 | tail -45
+
+      - name: numba (riscv64 wheels are cp314 only; best effort)
+        continue-on-error: true
+        run: |
+          . .venv/bin/activate
+          pip install --extra-index-url "$RUYI_INDEX" numba 2>&1 | tail -12
+          python - <<'PY'
+          import numba
+          from numba import njit
+          @njit
+          def f(a, b):
+              return a + b
+          print("numba version   :", numba.__version__)
+          print("njit f(1,2)     :", f(1, 2))
+          PY
+
+      - name: Post result
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh pr comment "${{ github.event.issue.number }}" --repo "${{ github.repository }}" --body \
+            "RuyiRepo llvmlite/numba riscv64 probe: **${{ job.status }}**
+          Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
