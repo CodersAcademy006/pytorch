@@ -65,28 +65,30 @@ jobs:
             ret i32 %r
           }}
           '''
-          mod = llvm.parse_assembly(asm)
-          mod.verify()
-          print("module verified : ok")
+          llvm.parse_assembly(asm).verify()
+          print("ir parse+verify : ok")
 
-          # Emit real riscv64 machine code. If the backend were broken this dies.
-          target = llvm.Target.from_triple(triple)
-          tm = target.create_target_machine()
-          obj = tm.emit_object(mod)
-          print("codegen         : ok,", len(obj), "bytes of object code")
+          # llvmlite ships its own JIT smoke check; use it rather than a
+          # hand-rolled one.
+          try:
+              llvm.check_jit_execution()
+              print("check_jit_execution: ok")
+          except Exception as e:
+              print("check_jit_execution: FAILED", type(e).__name__, e)
 
-          # Now the actual open question: does the JIT (OrcJIT/LLJIT, which
-          # replaced the RuntimeDyld path that lacked RISC-V) execute on riscv64?
-          lljit = llvm.create_lljit_compiler(tm)
-          rt = lljit.add_ir_module(llvm.parse_assembly(asm))
-          addr = lljit.lookup("add")
-          ptr = getattr(addr, "address", None) or int(addr)
-          print("LLJIT lookup    : ok ->", hex(ptr))
-          fn = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_int, ctypes.c_int)(ptr)
-          got = fn(2, 3)
+          # The actual open question: does OrcJIT/LLJIT (which replaced the
+          # RuntimeDyld path that lacked RISC-V) execute real code on riscv64?
+          lljit = llvm.create_lljit_compiler()
+          lib = (llvm.JITLibraryBuilder()
+                 .add_ir(asm)
+                 .export_symbol("add")
+                 .link(lljit, "probe"))
+          ptr = lib["add"]
+          print("LLJIT symbol    : ok ->", hex(ptr))
+          got = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_int, ctypes.c_int)(ptr)(2, 3)
           print("LLJIT add(2,3)  :", got)
           assert got == 5, f"JIT returned {got}, expected 5"
-          print("RESULT          : JIT EXECUTES CORRECTLY ON riscv64")
+          print("RESULT          : ORCJIT EXECUTES CORRECTLY ON NATIVE riscv64")
           PY
 
       - name: llvmlite test suite
