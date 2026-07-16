@@ -183,7 +183,7 @@ void embedding_bag_impl(
   for (uint32_t indices_idx = indices_start; indices_idx < indices_end;
        indices_idx++) {
     I weight_idx = indices[indices_idx];
-    if (weight_idx < 0 || static_cast<uint32_t>(weight_idx) > num_weights) {
+    if (weight_idx < 0 || static_cast<uint32_t>(weight_idx) >= num_weights) {
       TORCH_REPORT_ERROR(
           error_buf,
           "Index ",

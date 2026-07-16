@@ -16019,6 +16019,12 @@ class TestErrorInputs(TestCase):
         with self.assertRaisesRegex(torch.AcceleratorError, "Index 2 is out of bounds: 6, range 0 to 4"):
             torch.nn.functional.embedding_bag(inputs, weight, offsets)
             torch.mps.synchronize()
+        # Regression for https://github.com/pytorch/pytorch/issues/189971: an index equal to
+        # num_weights (the exact upper boundary) was accepted and read one row past the table.
+        boundary = torch.tensor([0, 1, 4], device=device)  # Note: 4 == num_weights for size 4
+        with self.assertRaisesRegex(torch.AcceleratorError, "Index 2 is out of bounds: 4, range 0 to 4"):
+            torch.nn.functional.embedding_bag(boundary, weight, offsets)
+            torch.mps.synchronize()
 
     def test_scatter_out_of_bounds(self, device):
         with self.assertRaisesRegex(torch.AcceleratorError, "out of bounds"):
