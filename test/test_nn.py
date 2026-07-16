@@ -12418,6 +12418,21 @@ class TestNNDeviceType(NNTestCase):
         print(logits.numel(), labels.numel(), loss.numel())
         self.assertTrue(torch.allclose(loss_cpu, loss.cpu(), rtol=1e-4, atol=1e-4))
 
+    # Ref: https://github.com/pytorch/pytorch/issues/190139
+    @onlyCUDA
+    @largeTensorTest("18GB", "cuda")
+    def test_nll_loss2d_backward_64bit_offsets(self, device):
+        # The reduce backward kernel computed per-sample offsets in 32-bit int,
+        # so grad_input with more than INT_MAX elements wrapped the base pointer
+        # and caused an illegal memory access. The spatial (N, C, d1, ...) shape
+        # routes cross_entropy's backward through nll_loss2d_backward_kernel.
+        n, c = 2 ** 16 + 1, 2 ** 15
+        logits = torch.zeros((n, c, 1, 1), dtype=torch.float16, device=device, requires_grad=True)
+        target = torch.zeros((n, 1, 1), dtype=torch.long, device=device)
+        F.cross_entropy(logits, target).backward()
+        torch.cuda.synchronize()
+        self.assertEqual(logits.grad.shape, logits.shape)
+
     def _nll_loss_helper(self, input_size, reduction, expected, device, dtype):
         input = torch.rand(input_size, requires_grad=True, device=device, dtype=dtype)
         num_channels = input_size[1]

@@ -182,13 +182,13 @@ __global__ void nll_loss2d_backward_kernel(
   const auto grad = -(size_average ? *grad_output / *total_weight
                                    : *grad_output);
 
-  const int sample = blockIdx.x / blocks_per_sample;
+  const int64_t sample = blockIdx.x / blocks_per_sample;
   const int step = blockDim.x * blocks_per_sample;
 
-  const int toffset = sample * map_nelem;
+  const int64_t toffset = sample * map_nelem;
   const auto* const target_thread = target + toffset;
 
-  const int ioffset = sample * map_nelem * n_classes;
+  const int64_t ioffset = sample * map_nelem * n_classes;
   auto* const grad_input_thread = grad_input + ioffset;
 
   for (int i = (blockIdx.x % blocks_per_sample) * blockDim.x + threadIdx.x;
