@@ -1169,12 +1169,7 @@ test_inductor_torchbench_smoketest_perf() {
   done
 
   # Perform some "warm-start" runs for a few huggingface models.
-  # NB: DistillGPT2 is excluded here because it has a known A100-specific inductor
-  # accuracy divergence (RMSE ~0.19 vs ~0.008 eager) that fails only on sm80; it
-  # still passes and is covered by the inductor_huggingface accuracy job on other
-  # runners. See pytorch/pytorch#187401. A one-off warm-start accuracy miss should
-  # not fail the whole smoke job. Re-add once the sm80 divergence is fixed.
-  for test in AllenaiLongformerBase DistilBertForMaskedLM GoogleFnet YituTechConvBert; do
+  for test in AllenaiLongformerBase DistilBertForMaskedLM DistillGPT2 GoogleFnet YituTechConvBert; do
     python benchmarks/dynamo/huggingface.py --accuracy --training --amp --inductor --device cuda --warm-start-latency \
       --only $test --output "$TEST_REPORTS_DIR/inductor_warm_start_smoketest_$test.csv"
     python benchmarks/dynamo/check_accuracy.py \
@@ -1185,11 +1180,13 @@ test_inductor_torchbench_smoketest_perf() {
 
 test_unbacked_parity_smoketest() {
   # Check that unbacked batch-only has performance parity with backed batch-only
-  # Fails if any model regresses beyond its per-model threshold (defined in the
-  # benchmark, see benchmarks/dynamo/common.py) consistently across 3 retries.
+  # Fails if any model regresses >THRESHOLD% consistently across 3 retries
   TEST_REPORTS_DIR=$(pwd)/test/test-reports
   mkdir -p "$TEST_REPORTS_DIR"
 
+  # 1.0% was below a100 timing noise (DistillGPT2/T5Small ~1.2-1.5% slower);
+  # 3.0% still catches real, much larger parity regressions.
+  local THRESHOLD=3.0
   local MAX_RETRIES=3
   local MODELS="MobileBertForMaskedLM|DistilBertForMaskedLM|DistillGPT2|T5Small"
 
@@ -1206,12 +1203,24 @@ test_unbacked_parity_smoketest() {
   check_regressions() {
     local run_num=$1
     local output_file="$TEST_REPORTS_DIR/unbacked_parity_results_run${run_num}.txt"
-    # The regression policy (per-model thresholds) lives in the benchmark itself
-    # (_run_compare_backed_unbacked in benchmarks/dynamo/common.py), which emits a
-    # canonical "UNBACKED_PARITY_REGRESSION:" verdict line. This just detects it.
-    # Returns 0 if a regression was reported, 1 otherwise.
-    if grep -q "^UNBACKED_PARITY_REGRESSION:" "$output_file"; then
-      grep "^UNBACKED_PARITY_REGRESSION:" "$output_file"
+    # Parse the comparison table and check for regressions > threshold
+    # Returns 0 if regressions found, 1 if no regressions
+    local regressions=()
+    while IFS= read -r line; do
+      # Issue 3: Broadened regex to match model names with hyphens, slashes, dots
+      # Match lines like: "  ModelName                      10.000      10.500    +5.0%"
+      if [[ "$line" =~ ^[[:space:]]+([A-Za-z0-9_./-]+)[[:space:]]+([0-9.]+)[[:space:]]+([0-9.]+)[[:space:]]+\+([0-9.]+)% ]]; then
+        local model="${BASH_REMATCH[1]}"
+        local diff="${BASH_REMATCH[4]}"
+        # Nit: Use awk instead of bc -l to avoid dependency on bc
+        if awk "BEGIN{exit !($diff > $THRESHOLD)}"; then
+          regressions+=("$model:+${diff}%")
+        fi
+      fi
+    done < "$output_file"
+
+    if [[ ${#regressions[@]} -gt 0 ]]; then
+      echo "Regressions found: ${regressions[*]}"
       return 0
     fi
     return 1
@@ -1277,7 +1286,7 @@ test_unbacked_parity_smoketest() {
 
   # Check for regressions
   if ! check_regressions 1; then
-    echo "✅ PASSED: No regressions above per-model thresholds"
+    echo "✅ PASSED: No regressions above ${THRESHOLD}% threshold"
     exit 0
   fi
 
@@ -1303,7 +1312,7 @@ test_unbacked_parity_smoketest() {
   local required=$((MAX_RETRIES / 2 + 1))
   if [[ $regression_count -ge $required ]]; then
     echo ""
-    echo "❌ REGRESSION CONFIRMED: Detected in $regression_count/$MAX_RETRIES runs"
+    echo "❌ REGRESSION CONFIRMED: Detected in $regression_count/$MAX_RETRIES runs (threshold: ${THRESHOLD}%)"
     exit 1
   else
     echo ""
@@ -2210,11 +2219,11 @@ elif [[ "${BUILD_ENVIRONMENT}" == *libtorch* ]]; then
 elif [[ "$TEST_CONFIG" == distributed ]]; then
   install_torchcomms
   install_spmd_types
-  # On CUDA the single-process (single-GPU) distributed tests are hived off to
-  # the `default` config's 1-GPU runner (see below), so this multi-GPU box only
-  # runs the process-spawning ones. Elsewhere (CPU pull, rocm) there is no such
-  # split, so run the whole suite.
-  if [[ "$BUILD_ENVIRONMENT" == *cuda* ]]; then
+  # On CUDA and ROCm the single-process (single-GPU) distributed tests are hived
+  # off to the `default` config's 1-GPU runner (see below), so this multi-GPU box
+  # only runs the process-spawning ones. Elsewhere (e.g. CPU pull) there is no
+  # such split, so run the whole suite.
+  if [[ "$BUILD_ENVIRONMENT" == *cuda* || "$BUILD_ENVIRONMENT" == *rocm* ]]; then
     test_distributed multigpu
   else
     test_distributed
@@ -2366,7 +2375,7 @@ elif [[ "${BUILD_ENVIRONMENT}" == *rocm* && -n "$TESTS_TO_INCLUDE" ]]; then
 elif [[ "${SHARD_NUMBER}" == 1 && $NUM_TEST_SHARDS -gt 1 ]]; then
   # TODO(temporary): run distributed-single first for faster signal while we
   # validate the split; move to the end once it's proven stable.
-  if [[ "${BUILD_ENVIRONMENT}" == *cuda* ]]; then
+  if [[ "${BUILD_ENVIRONMENT}" == *cuda* || "${BUILD_ENVIRONMENT}" == *rocm* ]]; then
     test_distributed_single_gpu
   fi
   test_lazy_tensor_meta_reference_disabled
@@ -2379,7 +2388,7 @@ elif [[ "${SHARD_NUMBER}" == 1 && $NUM_TEST_SHARDS -gt 1 ]]; then
     test_xpu_bin
   fi
 elif [[ "${SHARD_NUMBER}" == 2 && $NUM_TEST_SHARDS -gt 1 ]]; then
-  if [[ "${BUILD_ENVIRONMENT}" == *cuda* ]]; then
+  if [[ "${BUILD_ENVIRONMENT}" == *cuda* || "${BUILD_ENVIRONMENT}" == *rocm* ]]; then
     test_distributed_single_gpu
   fi
   install_torchvision
@@ -2392,7 +2401,7 @@ elif [[ "${SHARD_NUMBER}" == 2 && $NUM_TEST_SHARDS -gt 1 ]]; then
   test_libtorch_profiler
 elif [[ "${SHARD_NUMBER}" -gt 2 ]]; then
   # Handle arbitrary number of shards
-  if [[ "${BUILD_ENVIRONMENT}" == *cuda* ]]; then
+  if [[ "${BUILD_ENVIRONMENT}" == *cuda* || "${BUILD_ENVIRONMENT}" == *rocm* ]]; then
     test_distributed_single_gpu
   fi
   install_torchvision
