@@ -937,7 +937,12 @@ class TestPatternMatcher(TestCase):
             x = torch.full([10, 10], True, dtype=torch.int32)
             return torch.cumsum(x, 1)
 
-        for fn in (fn1, fn2, fn3, fn4, fn5, fn6):
+        def fn7():
+            # explicit dtype= must be honored, not the input full()'s dtype
+            x = torch.full([2, 4, 4], 1, dtype=torch.bool)
+            return torch.cumsum(x, 1, dtype=torch.bfloat16)
+
+        for fn in (fn1, fn2, fn3, fn4, fn5, fn6, fn7):
             result, (code,) = run_and_get_code(torch.compile(fn, fullgraph=True))
             self.assertNotIn("aten.cumsum", code)
             self.assertEqual(result, fn())
